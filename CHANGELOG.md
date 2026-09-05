@@ -15,7 +15,7 @@ not built.
 ### Added
 - `tradingview/northstar_motion_model.pine` — Pine v6 overlay indicator,
   ~1,500 lines, implementing the model end to end:
-  session and trading-day engine (Pacific day boundary, DST-aware), level
+  session and trading-day engine (CME 15:00→14:00 PT day, DST-aware), level
   engine, opening-range engine with hard lock, liquidity pools with sweep /
   reclaim / fail states, abnormal wick, eight-component displacement score,
   FVG registry with mitigation tracking, non-repainting pivots with BOS/MSS,
@@ -30,8 +30,10 @@ not built.
 
 ### Decided
 - **D-002** execution timeframe is 1 minute.
-- **D-003** trading day is 00:00–23:59 Pacific (03:00–02:59 ET) for previous-day
-  high, low, open and close.
+- **D-003** trading day is the CME futures session, 15:00 → 14:00 PT
+  (18:00 → 17:00 ET), for previous-day high, low, open and close. Corrected
+  from an earlier midnight-to-midnight reading; sessions are labelled by their
+  closing date and the daily reset moves to 15:00 PT.
 - **D-004** ORB is 05:00–05:15 PT, which is the 08:00–08:15 ET of the original
   specification restated in Pacific time.
 - **D-005** the stop-rule contradiction is deferred; the min/max/ORB-third stop

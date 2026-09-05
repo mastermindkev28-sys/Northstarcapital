@@ -70,7 +70,7 @@ Proposed default parameter surface: [`config/northstar.defaults.yaml`](config/no
 |---|---|
 | D-001 | Scope is a TradingView indicator; no bot, backend or execution layer |
 | D-002 | Execution timeframe is 1 minute |
-| D-003 | Trading day is 00:00–23:59 Pacific (= 03:00–02:59 ET) for prior-day levels |
+| D-003 | Trading day is the CME session, 15:00 → 14:00 PT (= 18:00 → 17:00 ET) |
 | D-004 | ORB is 05:00–05:15 PT (= 08:00–08:15 ET), locked at the close of the window |
 | D-005 | Stop-rule contradiction deferred; stop filters ship default-off |
 | D-006 | CISD removed; confluence is now X / 9 |

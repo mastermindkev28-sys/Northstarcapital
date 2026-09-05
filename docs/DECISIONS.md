@@ -34,24 +34,29 @@ definitions assume 1m bars.
 
 ---
 
-## D-003 · Trading day boundary: 00:00–23:59 Pacific  (resolves B4 / A-02)
+## D-003 · Trading day: 15:00 → 14:00 PT (the CME futures session)  (resolves B4 / A-02)
 
-**Decision.** The trading day for previous-day high/low/open/close runs from the
-daily open at **00:00 PT to 23:59 PT**.
+**Decision.** The trading day runs **15:00 PT to 14:00 PT the next day**, which
+is **18:00 ET to 17:00 ET** — the CME futures session for NQ.
+
+*Supersedes the earlier reading of "daily open of 12am PST", which was a
+misinterpretation on my part.*
 
 **Consequences.**
-- `PDH` / `PDL` / `PDO` / `PDC` are computed over the completed 00:00–23:59 PT
-  day. In Eastern terms that is 03:00–02:59 ET.
-- Pacific and Eastern shift together across DST, so this boundary is a constant
-  three hours ahead of ET year-round; the indicator uses a timezone-aware date,
-  not a fixed UTC offset, so DST is handled automatically.
-- `DAY OPEN` = the open of the 00:00 PT bar.
-- `MIDNIGHT OPEN (ET)` is retained as a separate key-open level (00:00 ET =
-  21:00 PT), tracked as the most recent occurrence rather than reset at the
-  Pacific day boundary, because it falls in the previous Pacific day.
-- Superseded: the earlier proposal of a CME futures day (18:00–17:00 ET).
-
----
+- `PDH` / `PDL` / `PDO` / `PDC` are the high, low, open and close of the
+  completed 15:00→14:00 PT session.
+- `DAY OPEN` = the open of the 15:00 PT bar. This is the genuine futures daily
+  open, and it now coincides with the start of the overnight window.
+- The 14:00–15:00 PT hour (17:00–18:00 ET) is the CME maintenance halt and
+  carries no bars, so the boundary is unambiguous.
+- Sessions are labelled by the date they **close** on, per CME convention: the
+  session opening 15:00 PT Thursday is Friday's session.
+- `MIDNIGHT OPEN (ET)` (00:00 ET = 21:00 PT) now falls inside the same trading
+  day as the morning it precedes, rather than in the previous one.
+- The model's daily reset — state machine, opening range, liquidity pools, key
+  opens — happens at 15:00 PT, not at local midnight.
+- Implemented with a TradingView session string rather than timestamp
+  arithmetic, so the boundary stays correct across DST transitions.
 
 ## D-004 · ORB window: 05:00–05:15 PT  (confirms the spec)
 

@@ -28,14 +28,22 @@ inputs are interpreted in the **Timezone** input, which defaults to
 
 | Window | Pacific | Eastern |
 |---|---|---|
-| Trading day (previous-day high/low/open/close) | 00:00 – 23:59 | 03:00 – 02:59 |
+| Trading day (previous-day high/low/open/close) | **15:00 – 14:00** next day | 18:00 – 17:00 |
 | Overnight high / low | 15:00 – 05:00 | 18:00 – 08:00 |
 | Opening range (locks at the end) | **05:00 – 05:15** | 08:00 – 08:15 |
 | Execution window | 05:30 – 08:00 | 08:30 – 11:00 |
 | Flat | 08:30 | 11:30 |
 
-Pacific and Eastern shift together across DST, so these stay aligned all year.
+The trading day is the CME futures session, so the 14:00–15:00 PT hour is the
+maintenance halt and carries no bars. Sessions are labelled by the date they
+close on, per CME convention. Boundaries are resolved from TradingView session
+strings, so they stay correct across DST.
+
 Change any of them in the **01 · SESSION** input group.
+
+The model's daily reset — state machine, opening range, liquidity pools, key
+opens — happens at **15:00 PT**, not at local midnight. From 15:00 PT the
+dashboard reads `PRE-MARKET` for the next morning's opening range.
 
 ---
 
@@ -146,7 +154,7 @@ would show them in hindsight. That is the correct trade.
 
 | Group | Controls |
 |---|---|
-| 01 · Session | timezone, ORB / execution / overnight windows, flat time |
+| 01 · Session | timezone, trading day, ORB / execution / overnight windows, flat time |
 | 02 · Opening range | min and max size in points |
 | 03 · Liquidity | penetration, reclaim window, wick and close-back rules, which pools to track, equal-high tolerance, both-sides-swept behaviour |
 | 04 · Abnormal wick | wick/range ratio, absolute size, ATR-relative bar size |
