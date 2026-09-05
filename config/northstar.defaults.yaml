@@ -1,0 +1,281 @@
+# ============================================================================
+# NORTHSTAR CAPITAL™ — MASTER PARAMETER DEFAULTS
+# ============================================================================
+# STATUS: PROPOSED — Phase 1 architecture. Not yet approved, not yet used by
+# any code (no code exists yet).
+#
+# status markers:
+#   spec     value stated in the Northstar specification
+#   proposed my starting point — UNVALIDATED, see docs/AMBIGUITY_REGISTER.md
+#
+# This file contains NO secrets. Secrets live only in environment variables.
+# ============================================================================
+
+param_version: "0.1.0-proposed"
+
+mode: shadow                      # shadow | backtest   (live is not implemented)
+
+instrument:
+  primary: NQ
+  secondary: MNQ
+  roll_mode: front_unadjusted     # proposed [A-21]
+  exclude_roll_day_levels: true   # proposed
+  NQ:
+    point_value: 20               # spec
+    tick_size: 0.25               # spec
+    commission_rt: 4.50           # proposed — SET TO YOUR REAL RATE
+    slippage_est: 1.00            # proposed — points, per side
+  MNQ:
+    point_value: 2                # spec
+    tick_size: 0.25
+    commission_rt: 1.20           # proposed
+    slippage_est: 1.00            # proposed
+
+session:
+  tz: America/New_York            # spec
+  premarket_start: "07:00"        # proposed
+  orb_start: "08:00"              # spec
+  orb_end: "08:15"                # spec — LOCK
+  exec_start: "08:30"             # spec
+  no_new_entries: "11:00"         # spec
+  flat_time: "11:30"              # spec
+  prev_day_mode: cme_day          # proposed [A-02] BLOCKING B4
+  overnight_start: "18:00"        # proposed [A-02]
+  overnight_end: "08:00"          # proposed [A-02]
+  daily_open_ref: "1800"          # proposed [A-02]
+  holiday_calendar: CME_EQUITY    # proposed [A-22]
+  skip_half_days: true            # proposed
+  skip_thin_sessions: false       # proposed
+  thin_vol_pctile: 10             # proposed
+
+tf:
+  exec: 1m                        # proposed [A-01] BLOCKING B1
+  context: 15m                    # proposed
+  bias: 4H                        # proposed
+  atr_len: 14                     # proposed
+
+orb:
+  min_points: 10                  # spec
+  max_points: 100                 # spec
+  mode: absolute                  # proposed [A-23] BLOCKING B12
+  atr_min_mult: 0.6
+  atr_max_mult: 3.0
+  lock_immutable: true            # spec — never modified after 08:15
+
+liquidity:
+  pen_mode: ticks                 # proposed [A-03]
+  pen_min_pts: 0.25
+  pen_atr_mult: 0.10
+  reclaim_window_bars: 3
+  reclaim_buffer_pts: 0.0
+  require_close_back: true
+  require_wick: true
+  pool_kinds: [PDH, PDL, ONH, ONL, ORB_HIGH, ORB_LOW, SWING_HIGH, SWING_LOW, EQH, EQL]
+  both_swept_action: no_trade     # spec default
+  both_swept_window_start: "08:30"  # proposed [A-24] BLOCKING B9
+  eq_tol_pts: 2.0                 # proposed [A-11]
+  eq_min_sep_bars: 3
+  eq_min_count: 2
+  eq_lookback_bars: 240
+
+wick:
+  ratio_min: 0.50                 # spec — declared research threshold [A-04]
+  min_pts: 5.0                    # proposed
+  min_range_atr: 0.8              # proposed
+  body_ratio_min: 2.0             # proposed (secondary, disabled)
+  body_ratio_enabled: false
+
+displacement:
+  min_score: 55                   # proposed [A-05]
+  strong_score: 80                # proposed
+  min_bars: 1
+  max_bars: 5
+  atr_target: 1.5
+  sweep_to_disp_max_bars: 10
+  weights:
+    atr: 30
+    body: 20
+    avg_body: 15
+    consistency: 10
+    close_loc: 10
+    opp_wick: 5
+    structure: 5
+    fvg: 5
+
+fvg:
+  sizing_mode: points             # points | atr
+  min_pts: 3.0                    # proposed [A-06]
+  min_atr_mult: 0.35
+  mitig_full: 1.0                 # proposed
+  require_displacement: true
+  max_age_bars: 60
+  required_for_setup: true        # spec
+
+structure:
+  pivot_left: 3                   # proposed [A-09]
+  pivot_right: 3                  # proposed — detection lag, no repaint
+  break_on: close                 # close | wick
+  timeout_bars: 15
+  trend_pivot_count: 2
+
+ob:
+  zone_mode: body_to_wick         # proposed [A-07]
+  lookback_bars: 5
+  require_bos: false
+  require_fvg: false
+  max_mitigations: 1
+
+rb:
+  wick_min: 0.50                  # proposed [A-08]
+  pen_min_pts: 0.25
+  require_reclaim: true
+  zone_mode: extreme_to_body
+
+cisd:
+  ref_mode: leg_first_open        # proposed [A-10] BLOCKING B3
+  leg_max_bars: 10
+  min_body_atr: 0.5
+  max_bars_after_sweep: 15
+  require_close: true             # spec
+
+bias:
+  threshold: 25                   # proposed [A-12]
+  adr_len: 14
+  weights:
+    daily_open: 15
+    midnight_open: 10
+    pd_position: 15
+    pd_close_loc: 10
+    htf_structure: 20
+    overnight: 10
+    liquidity_objective: 10
+    premium_discount: 10
+    news: 0                       # news gates trading, it does not set direction
+
+pd:
+  reference: orb                  # spec [A-14]
+  eq_band_pts: 2.0
+
+key_open:
+  proximity_pts: 5.0              # spec
+  set: [midnight_open, daily_open, open_0830, open_0930]
+
+retest:
+  zone_priority: [fvg_mid, fvg_edge, ob, rb, orb_level]
+  zone_pad_pts: 1.0
+  touch_tolerance_pts: 0.5
+  mfe_max_R: 1.0                  # spec — >1R before retest invalidates
+  timeout_bars: 20
+  fail_buffer_pts: 1.0
+  entry_ref: zone_touch
+  entry_ttl_bars: 5
+
+confirmation:
+  min_triggers: 1
+  vol_mult: 1.5                   # proposed [A-17] — activity, NOT order flow
+  vol_enabled: true
+  vol_display_only: true
+
+confluence:
+  min_required: 3                 # spec
+  max_display: 12                 # spec
+  factor_weights:                 # spec: +1 each
+    liquidity_sweep: 1
+    displacement: 1
+    fvg: 1
+    order_block: 1
+    rejection_block: 1
+    cisd: 1
+    daily_bias: 1
+    premium_discount: 1
+    key_open: 1
+    delta_divergence: 1
+    absorption: 1
+    clean_target_path: 1
+  is_probability: false           # spec — never render as a probability
+
+quality:
+  min_required: 60                # proposed [A-25]
+  bands: { invalid: 39, low: 59, developing: 74, high: 89 }   # spec
+  weights:
+    context: 12
+    liquidity: 12
+    displacement: 15
+    structure: 10
+    retest: 12
+    confirmation: 10
+    confluence: 12
+    risk: 9
+    target: 8
+
+path:
+  scan_mode: tp2                  # proposed [A-13]
+  fvg_min_pts: 3.0
+  ob_min_quality: 0.5
+  pivot_touches: 2
+  clear_max_severity: 1.0
+  tp1_weight: 2.0
+  obstructed_action: invalidate   # spec default
+
+risk:
+  stop_buffer_pts: 2.0            # proposed
+  stop_min_pts: 10                # spec
+  stop_max_pts: 30                # spec
+  stop_orb_fraction: 0.33333      # spec
+  conflict_policy: reject         # proposed [A-15] BLOCKING B2
+  risk_per_trade_usd: 500         # proposed — YOU MUST SET THIS
+  daily_loss_limit_usd: 1000      # proposed — YOU MUST SET THIS
+
+targets:
+  tp1_R: 2.0                      # spec
+  tp1_fraction: 0.50              # spec
+  be_after_tp1: true              # spec
+  tp2_hierarchy: [opposite_orb, fixed_4R, measured_move]   # spec
+  tp2_min_R: 3.0                  # proposed
+  tp2_fixed_R: 4.0                # spec
+
+runner:
+  trail_tf: 1m                    # spec
+  trail_pivot_left: 2
+  trail_pivot_right: 2
+  never_loosen: true
+
+daily:
+  max_trades: 2                   # spec
+  stop_after_first_win: true      # spec
+  second_trade_size_mult: 0.5     # spec
+  stop_after_two_losses: true     # spec
+  second_trade_after: loss_only   # proposed BLOCKING B11
+
+news:
+  source: null                    # BLOCKING B8
+  window_min: 5                   # proposed [A-16]
+  impact_min: high
+  blacklist: []
+  blackout_before_min: 2
+  blackout_after_min: 0
+
+orderflow:
+  provider: "null"                # NullOrderFlowProvider → UNAVAILABLE
+  absorb_vol_pctile: 90
+  absorb_max_move_atr: 0.25
+  never_synthesize_from_volume: true   # spec — IMMUTABLE, not overridable
+
+alerts:
+  min_state_change_only: true     # spec — no spam
+  dedupe_window_sec: 900
+  morning_brief_time: "07:45"
+  rate_limit_per_min: 10
+
+screenshot:
+  backend: server_render          # proposed [A-19] BLOCKING B7
+  dpi: 160
+  retention_days: 1825
+  stages: [premarket, orb_locked, liquidity_identified, liquidity_swept,
+           abnormal_wick, displacement, confluence_3, confluence_5,
+           confluence_7, confluence_10, retest, entry_ready, trade_entry,
+           tp1, tp2_exit, invalidation, day_complete]
+
+execution:
+  provider: "null"                # NullExecutionProvider — cannot trade
+  allow_live: false               # hard gate; flipping it alone does nothing

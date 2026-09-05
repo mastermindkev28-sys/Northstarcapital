@@ -1,0 +1,39 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# data & runtime artefacts
+logs/*
+!logs/.gitkeep
+screenshots/20*/
+*.sqlite
+*.db
+data/
+research/data/
+*.parquet
+*.csv
+!tests/fixtures/**/*.csv
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
