@@ -1,0 +1,1505 @@
+//@version=6
+// =============================================================================
+// NORTHSTAR CAPITAL - NORTHSTAR MOTION MODEL
+// Market intelligence indicator for NQ / MNQ futures on the 1-minute chart.
+//
+// This is not a buy/sell indicator. It reports where the market is inside the
+// Northstar progression and what condition it is waiting for:
+//
+//   CONTEXT -> LIQUIDITY -> SWEEP -> DISPLACEMENT -> IMBALANCE -> STRUCTURE
+//   -> RETEST -> CONFIRMATION -> CONFLUENCE -> RISK -> (ENTRY READY)
+//
+// Design rules honoured throughout:
+//   * No repainting. State advances only on confirmed (closed) bars. Pivots are
+//     published pivot_right bars after the fact and are never revised.
+//   * No lookahead. No request.security() calls anywhere in this script, so no
+//     higher-timeframe value can leak backwards.
+//   * The opening range locks at the end of its window and is never modified.
+//   * Order flow (delta, absorption) is reported as UNAVAILABLE, never
+//     synthesised from candle volume.
+//   * Every number is an input. Nothing is hard-coded.
+//   * Risk figures are DISPLAY ONLY. This script cannot place an order.
+//
+// Session defaults are Pacific time (see docs/DECISIONS.md):
+//   trading day 00:00-23:59 PT | ORB 05:00-05:15 PT | execution 05:30-08:00 PT
+//   flat 08:30 PT | overnight 15:00-05:00 PT
+//   (= day 03:00-02:59 ET | ORB 08:00-08:15 ET | execution 08:30-11:00 ET)
+// =============================================================================
+
+indicator("Northstar Motion Model", shorttitle = "NORTHSTAR", overlay = true, max_boxes_count = 500, max_labels_count = 500, max_lines_count = 500)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+
+// --- 01 SESSION --------------------------------------------------------------
+var string G_SESS = "01 · SESSION"
+tzIn      = input.string("America/Los_Angeles", "Timezone", options = ["America/Los_Angeles", "America/Denver", "America/Chicago", "America/New_York", "UTC"], group = G_SESS, tooltip = "All session windows below are interpreted in this timezone. Default Pacific: your trading day is 00:00-23:59 PT.")
+orbSessIn = input.session("0500-0515", "ORB window", group = G_SESS, tooltip = "Default 05:00-05:15 PT = 08:00-08:15 ET.")
+exeSessIn = input.session("0530-0800", "Execution window", group = G_SESS, tooltip = "Default 05:30-08:00 PT = 08:30-11:00 ET. No new setups qualify after this window.")
+onSessIn  = input.session("1500-0500", "Overnight window", group = G_SESS, tooltip = "Default 15:00-05:00 PT = 18:00-08:00 ET. Sets overnight high / low.")
+flatMinIn = input.int(510, "Flat time (minutes past midnight, chart tz)", minval = 0, maxval = 1439, group = G_SESS, tooltip = "510 = 08:30 PT = 11:30 ET. Marks the session as complete.")
+warnTfIn  = input.bool(true, "Warn if not on a 1-minute chart", group = G_SESS)
+
+// --- 02 ORB ------------------------------------------------------------------
+var string G_ORB = "02 · OPENING RANGE"
+orbMinIn  = input.float(10.0, "Minimum ORB size (points)", minval = 0.0, step = 0.25, group = G_ORB, tooltip = "Below this the day is STAND DOWN.")
+orbMaxIn  = input.float(100.0, "Maximum ORB size (points)", minval = 1.0, step = 0.25, group = G_ORB, tooltip = "Above this the day is STAND DOWN.")
+
+// --- 03 LIQUIDITY ------------------------------------------------------------
+var string G_LIQ = "03 · LIQUIDITY"
+penMinIn   = input.float(0.25, "Sweep penetration minimum (points)", minval = 0.0, step = 0.25, group = G_LIQ, tooltip = "How far beyond a level price must trade to count as a penetration. 0.25 = one NQ tick.")
+reclaimBar = input.int(3, "Reclaim window (bars)", minval = 1, maxval = 20, group = G_LIQ, tooltip = "Price must close back through the level within this many bars for the sweep to qualify.")
+reqCloseBk = input.bool(true, "Require close back inside range", group = G_LIQ)
+reqWickIn  = input.bool(true, "Require abnormal wick on the sweep bar", group = G_LIQ)
+bothSwActn = input.string("NO TRADE", "If both ORB extremes are swept", options = ["NO TRADE", "WARN ONLY"], group = G_LIQ)
+bothSwExec = input.bool(true, "Only count sweeps from the execution window", group = G_LIQ, tooltip = "On: a pre-05:30 PT sweep does not disqualify the day.")
+usePDH     = input.bool(true, "Pool: previous day high / low", group = G_LIQ)
+useONHL    = input.bool(true, "Pool: overnight high / low", group = G_LIQ)
+useORBHL   = input.bool(true, "Pool: ORB high / low", group = G_LIQ)
+useSwings  = input.bool(true, "Pool: confirmed swing highs / lows", group = G_LIQ)
+eqTolIn    = input.float(2.0, "Equal high / low tolerance (points)", minval = 0.0, step = 0.25, group = G_LIQ)
+
+// --- 04 ABNORMAL WICK --------------------------------------------------------
+var string G_WICK = "04 · ABNORMAL WICK"
+wickRatioIn = input.float(0.50, "Wick / range minimum", minval = 0.0, maxval = 1.0, step = 0.01, group = G_WICK, tooltip = "Research default from the specification. Not a validated optimum.")
+wickPtsIn   = input.float(5.0, "Wick minimum size (points)", minval = 0.0, step = 0.25, group = G_WICK, tooltip = "Stops a 60% wick on a 1.5-point doji counting as a liquidity event.")
+wickAtrIn   = input.float(0.8, "Bar range minimum (x ATR)", minval = 0.0, step = 0.1, group = G_WICK)
+
+// --- 05 DISPLACEMENT ---------------------------------------------------------
+var string G_DISP = "05 · DISPLACEMENT"
+dispMinIn   = input.int(55, "Qualifying score", minval = 0, maxval = 100, group = G_DISP)
+dispStrIn   = input.int(80, "Strong score", minval = 0, maxval = 100, group = G_DISP)
+dispMinBar  = input.int(1, "Minimum leg length (bars)", minval = 1, maxval = 10, group = G_DISP)
+dispMaxBar  = input.int(5, "Maximum leg length (bars)", minval = 1, maxval = 10, group = G_DISP)
+dispAtrTgt  = input.float(1.5, "ATR expansion target", minval = 0.1, step = 0.1, group = G_DISP)
+dispWaitIn  = input.int(10, "Maximum bars from sweep to displacement", minval = 1, maxval = 60, group = G_DISP)
+wAtr        = input.int(30, "Weight · ATR expansion", minval = 0, maxval = 100, group = G_DISP)
+wBody       = input.int(20, "Weight · body dominance", minval = 0, maxval = 100, group = G_DISP)
+wAvgBody    = input.int(15, "Weight · average-body expansion", minval = 0, maxval = 100, group = G_DISP)
+wCons       = input.int(10, "Weight · directional consistency", minval = 0, maxval = 100, group = G_DISP)
+wCloseLoc   = input.int(10, "Weight · close location", minval = 0, maxval = 100, group = G_DISP)
+wOppWick    = input.int(5, "Weight · opposing-wick cleanliness", minval = 0, maxval = 100, group = G_DISP)
+wStructW    = input.int(5, "Weight · structure break in leg", minval = 0, maxval = 100, group = G_DISP)
+wFvgW       = input.int(5, "Weight · FVG created in leg", minval = 0, maxval = 100, group = G_DISP)
+
+// --- 06 FVG ------------------------------------------------------------------
+var string G_FVG = "06 · IMBALANCE / FVG"
+fvgMinIn    = input.float(3.0, "Minimum gap size (points)", minval = 0.0, step = 0.25, group = G_FVG)
+fvgReqDisp  = input.bool(true, "Require the gap to sit inside a displacement leg", group = G_FVG)
+fvgReqSetup = input.bool(true, "Require an FVG for a setup to qualify", group = G_FVG)
+fvgMitigIn  = input.float(1.0, "Full-mitigation fill fraction", minval = 0.1, maxval = 1.0, step = 0.05, group = G_FVG, tooltip = "1.0 = price must wick through the far edge. 0.5 = midpoint counts as used up.")
+fvgMaxAge   = input.int(120, "Discard gaps older than (bars)", minval = 10, maxval = 500, group = G_FVG)
+
+// --- 07 STRUCTURE ------------------------------------------------------------
+var string G_STR = "07 · STRUCTURE"
+pivLeftIn   = input.int(3, "Pivot left bars", minval = 1, maxval = 20, group = G_STR)
+pivRightIn  = input.int(3, "Pivot right bars", minval = 1, maxval = 20, group = G_STR, tooltip = "Pivots are published this many bars late. That lag is deliberate: it is what makes them non-repainting.")
+strBreakOn  = input.string("Close", "Break confirmed on", options = ["Close", "Wick"], group = G_STR)
+strTimeout  = input.int(15, "Structure timeout (bars)", minval = 1, maxval = 100, group = G_STR)
+
+// --- 08 ZONES ----------------------------------------------------------------
+var string G_ZONE = "08 · ORDER / REJECTION BLOCKS"
+obModeIn    = input.string("Body to wick", "Order block zone", options = ["Body only", "Body to wick", "Full range"], group = G_ZONE)
+obLookback  = input.int(5, "Order block lookback (bars)", minval = 1, maxval = 30, group = G_ZONE)
+rbWickIn    = input.float(0.50, "Rejection block minimum wick fraction", minval = 0.0, maxval = 1.0, step = 0.01, group = G_ZONE)
+
+// --- 09 BIAS -----------------------------------------------------------------
+var string G_BIAS = "09 · DAILY BIAS"
+biasThIn    = input.int(25, "Bias threshold (absolute score)", minval = 0, maxval = 100, group = G_BIAS, tooltip = "Above +threshold is BULLISH, below -threshold is BEARISH, otherwise NEUTRAL.")
+bwDayOpen   = input.int(20, "Weight · price vs day open", minval = 0, maxval = 100, group = G_BIAS)
+bwMidOpen   = input.int(10, "Weight · price vs midnight ET open", minval = 0, maxval = 100, group = G_BIAS)
+bwPdPos     = input.int(20, "Weight · position in previous-day range", minval = 0, maxval = 100, group = G_BIAS)
+bwPdClose   = input.int(15, "Weight · previous-day close location", minval = 0, maxval = 100, group = G_BIAS)
+bwOn        = input.int(15, "Weight · overnight positioning", minval = 0, maxval = 100, group = G_BIAS)
+bwLiqObj    = input.int(20, "Weight · liquidity objective asymmetry", minval = 0, maxval = 100, group = G_BIAS)
+
+// --- 10 LOCATION -------------------------------------------------------------
+var string G_LOC = "10 · PREMIUM / DISCOUNT & KEY OPENS"
+eqBandIn    = input.float(2.0, "Equilibrium band (points)", minval = 0.0, step = 0.25, group = G_LOC)
+keyOpenProx = input.float(5.0, "Key open proximity (points)", minval = 0.0, step = 0.25, group = G_LOC)
+
+// --- 11 RETEST ---------------------------------------------------------------
+var string G_RET = "11 · RETEST"
+zonePadIn   = input.float(1.0, "Zone padding (points)", minval = 0.0, step = 0.25, group = G_RET)
+mfeMaxRIn   = input.float(1.0, "Invalidate if price travels more than (R) before retest", minval = 0.1, step = 0.1, group = G_RET)
+retestTmOut = input.int(20, "Retest timeout (bars)", minval = 1, maxval = 200, group = G_RET)
+failBufIn   = input.float(1.0, "Zone failure buffer (points)", minval = 0.0, step = 0.25, group = G_RET)
+zonePrefIn  = input.string("FVG midpoint", "Preferred retest zone", options = ["FVG midpoint", "FVG near edge", "Order block", "Rejection block", "Broken ORB level"], group = G_RET)
+
+// --- 12 CONFLUENCE & QUALITY -------------------------------------------------
+var string G_CQ = "12 · CONFLUENCE & QUALITY"
+confMinIn   = input.int(3, "Minimum confluence", minval = 0, maxval = 9, group = G_CQ, tooltip = "Out of 9 available factors. Delta divergence and absorption are unavailable in TradingView and are excluded from the denominator.")
+qualMinIn   = input.int(60, "Minimum quality score", minval = 0, maxval = 100, group = G_CQ)
+qwContext   = input.int(12, "Weight · context", minval = 0, maxval = 100, group = G_CQ)
+qwLiq       = input.int(12, "Weight · liquidity", minval = 0, maxval = 100, group = G_CQ)
+qwDisp      = input.int(15, "Weight · displacement", minval = 0, maxval = 100, group = G_CQ)
+qwStruct    = input.int(10, "Weight · structure", minval = 0, maxval = 100, group = G_CQ)
+qwRetest    = input.int(12, "Weight · retest", minval = 0, maxval = 100, group = G_CQ)
+qwConfirm   = input.int(10, "Weight · confirmation", minval = 0, maxval = 100, group = G_CQ)
+qwConf      = input.int(12, "Weight · confluence", minval = 0, maxval = 100, group = G_CQ)
+qwRisk      = input.int(9, "Weight · risk geometry", minval = 0, maxval = 100, group = G_CQ)
+qwTarget    = input.int(8, "Weight · target quality", minval = 0, maxval = 100, group = G_CQ)
+
+// --- 13 RISK (DISPLAY ONLY) --------------------------------------------------
+var string G_RISK = "13 · RISK & TARGETS (display only)"
+stopBufIn   = input.float(2.0, "Stop buffer beyond swept extreme (points)", minval = 0.0, step = 0.25, group = G_RISK)
+useStopFlt  = input.bool(false, "Enforce stop min / max filters", group = G_RISK, tooltip = "Off by default. The 10-point minimum and the ORB/3 rule are mutually unsatisfiable below a 30-point ORB - see docs/RISK_RULES.md. Leave off unless you have resolved that.")
+stopMinIn   = input.float(10.0, "Minimum stop (points)", minval = 0.0, step = 0.25, group = G_RISK)
+stopMaxIn   = input.float(30.0, "Maximum stop (points)", minval = 0.0, step = 0.25, group = G_RISK)
+stopOrbFrac = input.float(0.3333, "Maximum stop as a fraction of ORB", minval = 0.05, maxval = 1.0, step = 0.0001, group = G_RISK)
+tp1RIn      = input.float(2.0, "TP1 (R)", minval = 0.1, step = 0.1, group = G_RISK)
+tp2ModeIn   = input.string("Opposite ORB, else 4R", "TP2 source", options = ["Opposite ORB, else 4R", "Fixed 4R", "Measured move"], group = G_RISK)
+tp2RIn      = input.float(4.0, "TP2 fixed (R)", minval = 0.1, step = 0.1, group = G_RISK)
+tp2MinRIn   = input.float(3.0, "Opposite ORB must be at least (R)", minval = 0.1, step = 0.1, group = G_RISK)
+pathClearIn = input.float(1.0, "Maximum obstruction severity for PATH CLEAR", minval = 0.0, step = 0.1, group = G_RISK)
+pathBlockIn = input.bool(true, "Obstructed target invalidates the setup", group = G_RISK)
+pointValIn  = input.float(20.0, "Point value (NQ 20, MNQ 2)", minval = 0.01, step = 0.01, group = G_RISK)
+riskUsdIn   = input.float(500.0, "Reference risk per trade (USD)", minval = 1.0, step = 25.0, group = G_RISK, tooltip = "Used only to display an indicative contract count. No order is ever placed.")
+
+// --- 14 DISPLAY --------------------------------------------------------------
+var string G_DSP = "14 · DISPLAY"
+showDash    = input.bool(true, "Show dashboard", group = G_DSP)
+dashPos     = input.string("Top right", "Dashboard position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = G_DSP)
+dashSize    = input.string("Small", "Dashboard text size", options = ["Tiny", "Small", "Normal"], group = G_DSP)
+showCheck   = input.bool(false, "Show checklist panel", group = G_DSP)
+showLevels  = input.bool(true, "Draw session levels", group = G_DSP)
+showORBBox  = input.bool(true, "Draw ORB box", group = G_DSP)
+showZones   = input.bool(true, "Draw FVG / order block / rejection block zones", group = G_DSP)
+showEvents  = input.bool(true, "Draw event markers", group = G_DSP)
+showPlan    = input.bool(true, "Draw entry / stop / target lines", group = G_DSP)
+showLabels  = input.bool(true, "Label levels at the right edge", group = G_DSP)
+maxZonesIn  = input.int(12, "Maximum zones drawn per side", minval = 1, maxval = 60, group = G_DSP)
+
+// --- 15 COLOURS --------------------------------------------------------------
+var string G_COL = "15 · COLOURS"
+cBull    = input.color(color.new(#1e88a8, 0), "Bullish", group = G_COL)
+cBear    = input.color(color.new(#b0483c, 0), "Bearish", group = G_COL)
+cNeutral = input.color(color.new(#7a8391, 0), "Neutral", group = G_COL)
+cAccent  = input.color(color.new(#c9a227, 0), "Accent", group = G_COL)
+cLevel   = input.color(color.new(#8b93a1, 0), "Session levels", group = G_COL)
+cORB     = input.color(color.new(#c9a227, 0), "Opening range", group = G_COL)
+cPanelBg = input.color(color.new(#0d1117, 10), "Panel background", group = G_COL)
+cPanelFg = input.color(color.new(#e6edf3, 0), "Panel text", group = G_COL)
+cPanelDim= input.color(color.new(#8b949e, 0), "Panel label text", group = G_COL)
+
+// --- 16 ALERTS ---------------------------------------------------------------
+var string G_ALR = "16 · ALERTS"
+alertFmt    = input.string("Text", "Alert format", options = ["Text", "JSON"], group = G_ALR, tooltip = "JSON emits the Northstar event envelope, ready for a webhook backend later.")
+alSweep     = input.bool(true, "Alert · liquidity swept", group = G_ALR)
+alDisp      = input.bool(true, "Alert · displacement confirmed", group = G_ALR)
+alRetest    = input.bool(true, "Alert · retest detected", group = G_ALR)
+alEntry     = input.bool(true, "Alert · entry ready", group = G_ALR)
+alInval     = input.bool(true, "Alert · setup invalidated", group = G_ALR)
+alOrb       = input.bool(true, "Alert · ORB locked", group = G_ALR)
+alDayDone   = input.bool(false, "Alert · day complete", group = G_ALR)
+
+// =============================================================================
+// TYPES
+// =============================================================================
+
+// A pool of resting liquidity at a known level.
+type Pool
+    string kind        // PDH PDL ONH ONL ORBH ORBL SWH SWL EQH EQL
+    float  lvl
+    int    side        // +1 buy side (above price) | -1 sell side (below price)
+    string st          // IDENTIFIED SWEPT RECLAIMED FAILED
+    int    penBar
+    float  penDepth
+    bool   wick
+    int    recBar
+    int    strength
+
+// A price zone: fair value gap, order block or rejection block.
+type Zone
+    string kind        // FVG OB RB
+    float  top
+    float  bot
+    int    dir         // +1 bullish | -1 bearish
+    int    bidx
+    string st          // ACTIVE PARTIAL FULL INVALID
+    float  fill
+    box    bx
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+atrLenIn = input.int(14, "ATR length", minval = 2, maxval = 100, group = G_DISP)
+
+pad2(int n) =>
+    n < 10 ? "0" + str.tostring(n) : str.tostring(n)
+
+// Price formatted to the instrument's tick precision.
+f2(float x) =>
+    na(x) ? "—" : str.tostring(x, format.mintick)
+
+// Plain number, two decimals.
+n2(float x) =>
+    na(x) ? "—" : str.tostring(x, "#.00")
+
+// Signed integer with an explicit sign, the way a bias score should read.
+sgn(float x) =>
+    na(x) ? "—" : (x > 0 ? "+" : "") + str.tostring(math.round(x))
+
+clamp01(float x) =>
+    math.max(0.0, math.min(1.0, x))
+
+yn(bool b) =>
+    b ? "YES" : "NO"
+
+// =============================================================================
+// TIME, SESSION AND THE TRADING DAY
+// =============================================================================
+
+atr = ta.atr(atrLenIn)
+
+// The trading day runs 00:00-23:59 in the chart timezone (Pacific by default),
+// so the day identifier is simply the local calendar date. Pacific and Eastern
+// shift together across DST, so this stays a constant three hours ahead of ET
+// without any fixed-offset arithmetic.
+dY = year(time, tzIn)
+dM = month(time, tzIn)
+dD = dayofmonth(time, tzIn)
+dayId = dY * 10000 + dM * 100 + dD
+newDay = na(dayId[1]) or dayId != dayId[1]
+sessionDate = str.tostring(dY) + "-" + pad2(dM) + "-" + pad2(dD)
+
+minsOfDay = hour(time, tzIn) * 60 + minute(time, tzIn)
+
+// Eastern-time clock, used only for the key opens that are defined in ET.
+etMins = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+etDayId = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
+newEtDay = na(etDayId[1]) or etDayId != etDayId[1]
+
+inORB  = not na(time(timeframe.period, orbSessIn, tzIn))
+inExec = not na(time(timeframe.period, exeSessIn, tzIn))
+inON   = not na(time(timeframe.period, onSessIn,  tzIn))
+
+orbStarted = inORB and not inORB[1]
+orbEnded   = not inORB and inORB[1]
+execOpened = inExec and not inExec[1]
+pastFlat   = minsOfDay >= flatMinIn
+
+confirmed = barstate.isconfirmed
+
+// =============================================================================
+// SESSION LEVELS
+// =============================================================================
+
+// --- rolling trading day (00:00-23:59 chart tz) -------------------------------
+var float dHigh = na
+var float dLow  = na
+var float dOpen = na
+var float pdH   = na
+var float pdL   = na
+var float pdO   = na
+var float pdC   = na
+
+if newDay
+    pdH  := dHigh
+    pdL  := dLow
+    pdO  := dOpen
+    pdC  := close[1]
+    dHigh := high
+    dLow  := low
+    dOpen := open
+else
+    dHigh := na(dHigh) ? high : math.max(dHigh, high)
+    dLow  := na(dLow)  ? low  : math.min(dLow,  low)
+
+// --- overnight window ---------------------------------------------------------
+var float onH = na
+var float onL = na
+if inON and not inON[1]
+    onH := high
+    onL := low
+else if inON
+    onH := math.max(onH, high)
+    onL := math.min(onL, low)
+onRange = na(onH) or na(onL) ? na : onH - onL
+
+// --- key opens ----------------------------------------------------------------
+// Midnight ET falls inside the previous Pacific day, so it is tracked as "most
+// recent occurrence" rather than reset at the Pacific day boundary.
+var float midnightET = na
+if newEtDay
+    midnightET := open
+
+var float open0830 = na
+var float open0930 = na
+if newDay
+    open0830 := na
+    open0930 := na
+if na(open0830) and etMins >= 510
+    open0830 := open
+if na(open0930) and etMins >= 570
+    open0930 := open
+
+// =============================================================================
+// OPENING RANGE — built inside the window, locked at the close of it, never
+// modified afterwards.
+// =============================================================================
+
+var float orbH      = na
+var float orbL      = na
+var bool  orbLocked = false
+var int   orbLockBar = na
+var int   orbStartBar = na
+
+if newDay
+    orbLocked := false
+    orbH := na
+    orbL := na
+    orbLockBar := na
+    orbStartBar := na
+
+if orbStarted
+    orbH := high
+    orbL := low
+    orbStartBar := bar_index
+    orbLocked := false
+else if inORB
+    orbH := math.max(orbH, high)
+    orbL := math.min(orbL, low)
+
+if orbEnded and not orbLocked
+    orbLocked := true
+    orbLockBar := bar_index
+
+orbRange = na(orbH) or na(orbL) ? na : orbH - orbL
+orbEq    = na(orbH) or na(orbL) ? na : (orbH + orbL) / 2.0
+orbValid = orbLocked and not na(orbRange) and orbRange >= orbMinIn and orbRange <= orbMaxIn
+orbStatus = not orbLocked ? (inORB ? "BUILDING" : "PENDING") : (na(orbRange) ? "NO DATA" : orbRange < orbMinIn ? "STAND DOWN · TOO SMALL" : orbRange > orbMaxIn ? "STAND DOWN · TOO LARGE" : "LIVE")
+
+// =============================================================================
+// ABNORMAL WICK
+// A long wick only means something if the bar itself is meaningful, so the
+// ratio test is paired with an absolute size test and an ATR-relative test.
+// =============================================================================
+
+barRange = high - low
+barBody  = math.abs(close - open)
+upWick   = high - math.max(open, close)
+dnWick   = math.min(open, close) - low
+upWickR  = barRange > 0 ? upWick / barRange : 0.0
+dnWickR  = barRange > 0 ? dnWick / barRange : 0.0
+
+abnUp = upWickR >= wickRatioIn and upWick >= wickPtsIn and barRange >= wickAtrIn * atr
+abnDn = dnWickR >= wickRatioIn and dnWick >= wickPtsIn and barRange >= wickAtrIn * atr
+
+bodyAbs   = math.abs(close - open)
+bodySma20 = ta.sma(bodyAbs, 20)
+
+// =============================================================================
+// STRUCTURE — pivots are published pivotRight bars after they form and are
+// never revised. That lag is the price of not repainting.
+// =============================================================================
+
+ph = ta.pivothigh(high, pivLeftIn, pivRightIn)
+pl = ta.pivotlow(low, pivLeftIn, pivRightIn)
+
+var float lastPH = na
+var float prevPH = na
+var int   lastPHBar = na
+var float lastPL = na
+var float prevPL = na
+var int   lastPLBar = na
+
+if not na(ph)
+    prevPH := lastPH
+    lastPH := ph
+    lastPHBar := bar_index - pivRightIn
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
+    lastPLBar := bar_index - pivRightIn
+
+// Prevailing trend from the last two confirmed pivot pairs.
+trendDir = not na(lastPH) and not na(prevPH) and not na(lastPL) and not na(prevPL) ? (lastPH > prevPH and lastPL > prevPL ? 1 : lastPH < prevPH and lastPL < prevPL ? -1 : 0) : 0
+
+var float brokenPH = na
+var float brokenPL = na
+var int   lastBreakBar = na
+var int   lastBreakDir = 0
+var string lastBreakKind = ""
+
+breakUpRef = strBreakOn == "Close" ? close : high
+breakDnRef = strBreakOn == "Close" ? close : low
+
+bosUp = false
+bosDn = false
+if confirmed and not na(lastPH) and breakUpRef > lastPH and (na(brokenPH) or lastPH != brokenPH)
+    brokenPH := lastPH
+    lastBreakBar := bar_index
+    lastBreakDir := 1
+    lastBreakKind := trendDir < 0 ? "MSS" : "BOS"
+    bosUp := true
+if confirmed and not na(lastPL) and breakDnRef < lastPL and (na(brokenPL) or lastPL != brokenPL)
+    brokenPL := lastPL
+    lastBreakBar := bar_index
+    lastBreakDir := -1
+    lastBreakKind := trendDir > 0 ? "MSS" : "BOS"
+    bosDn := true
+
+structureLabel = na(lastBreakBar) ? "—" : lastBreakKind + " " + (lastBreakDir == 1 ? "BULLISH" : "BEARISH")
+
+// =============================================================================
+// DISPLACEMENT — an eight-component score, 0-100. Every weight is an input.
+// The leg is the best-scoring run of dispMinBar..dispMaxBar bars ending here.
+// =============================================================================
+
+wSum = math.max(1, wAtr + wBody + wAvgBody + wCons + wCloseLoc + wOppWick + wStructW + wFvgW)
+
+dispEval(int n) =>
+    o0 = open[n - 1]
+    c0 = close
+    move = c0 - o0
+    dir = move >= 0 ? 1 : -1
+    hh = high
+    ll = low
+    bodySum = 0.0
+    consN = 0
+    oppW = 0.0
+    fvgIn = false
+    for k = 0 to n - 1
+        hh := math.max(hh, high[k])
+        ll := math.min(ll, low[k])
+        bodySum += math.abs(close[k] - open[k])
+        bdir = close[k] >= open[k] ? 1 : -1
+        consN += bdir == dir ? 1 : 0
+        oppW += dir == 1 ? math.max(0.0, math.min(open[k], close[k]) - low[k]) : math.max(0.0, high[k] - math.max(open[k], close[k]))
+        gap = dir == 1 ? low[k] - high[k + 2] : low[k + 2] - high[k]
+        fvgIn := fvgIn or gap >= fvgMinIn
+    legRange = math.max(hh - ll, syminfo.mintick)
+    atrRatio = atr > 0 ? math.abs(move) / atr : 0.0
+    bodyRatio = bodySum / legRange
+    avgBody = bodySum / n
+    refBody = bodySma20[n]
+    avgBodyRatio = na(refBody) or refBody <= 0 ? 1.0 : avgBody / refBody
+    consR = consN / n
+    closeLoc = dir == 1 ? (c0 - ll) / legRange : (hh - c0) / legRange
+    oppWickR = 1.0 - math.min(1.0, oppW / legRange)
+    structIn = not na(lastBreakBar) and (bar_index - lastBreakBar) < n and lastBreakDir == dir
+    sc = 0.0
+    sc += wAtr      * clamp01(atrRatio / math.max(dispAtrTgt, 0.01))
+    sc += wBody     * clamp01((bodyRatio - 0.40) / 0.50)
+    sc += wAvgBody  * clamp01((avgBodyRatio - 1.0) / 2.0)
+    sc += wCons     * clamp01(consR)
+    sc += wCloseLoc * clamp01((closeLoc - 0.50) / 0.40)
+    sc += wOppWick  * clamp01((oppWickR - 0.50) / 0.40)
+    sc += wStructW  * (structIn ? 1.0 : 0.0)
+    sc += wFvgW     * (fvgIn ? 1.0 : 0.0)
+    [100.0 * sc / wSum, dir, math.abs(move), hh, ll, fvgIn, structIn]
+
+bestScore = 0.0
+bestDir   = 0
+bestBars  = 0
+bestMove  = 0.0
+bestHi    = high
+bestLo    = low
+bestFvg   = false
+bestStr   = false
+
+for n = dispMinBar to math.max(dispMinBar, dispMaxBar)
+    [sc, dr, mv, hh, ll, fv, st] = dispEval(n)
+    if sc > bestScore
+        bestScore := sc
+        bestDir   := dr
+        bestBars  := n
+        bestMove  := mv
+        bestHi    := hh
+        bestLo    := ll
+        bestFvg   := fv
+        bestStr   := st
+
+dispClass = bestScore >= dispStrIn ? "STRONG" : bestScore >= dispMinIn ? "QUALIFIED" : bestScore >= 30 ? "WEAK" : "NONE"
+dispQualified = bestScore >= dispMinIn and bestDir != 0
+
+// =============================================================================
+// ZONES — fair value gaps, order blocks, rejection blocks in one registry.
+// =============================================================================
+
+var array<Zone> zones = array.new<Zone>()
+
+zoneColor(string kind, int dir) =>
+    base = dir == 1 ? cBull : cBear
+    kind == "FVG" ? color.new(base, 82) : kind == "OB" ? color.new(base, 74) : color.new(cAccent, 78)
+
+addZone(string kind, float top, float bot, int dir) =>
+    z = Zone.new(kind = kind, top = top, bot = bot, dir = dir, bidx = bar_index, st = "ACTIVE", fill = 0.0, bx = na)
+    if showZones
+        z.bx := box.new(bar_index, top, bar_index + 1, bot, border_color = color.new(dir == 1 ? cBull : cBear, 55), border_width = 1, bgcolor = zoneColor(kind, dir))
+    array.push(zones, z)
+    if array.size(zones) > maxZonesIn * 3
+        old = array.shift(zones)
+        if not na(old.bx)
+            box.delete(old.bx)
+    z
+
+// --- fair value gap detection -------------------------------------------------
+gapUp = confirmed and low > high[2] and (low - high[2]) >= fvgMinIn
+gapDn = confirmed and high < low[2] and (low[2] - high) >= fvgMinIn
+gapOkUp = gapUp and (not fvgReqDisp or (dispQualified and bestDir == 1))
+gapOkDn = gapDn and (not fvgReqDisp or (dispQualified and bestDir == -1))
+
+if gapOkUp
+    addZone("FVG", low, high[2], 1)
+if gapOkDn
+    addZone("FVG", low[2], high, -1)
+
+// --- zone maintenance: mitigation, invalidation, extension --------------------
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        z = array.get(zones, i)
+        h = z.top - z.bot
+        if z.st != "INVALID"
+            pen = z.dir == 1 ? z.top - low : high - z.bot
+            f = h > 0 ? clamp01(pen / h) : 0.0
+            z.fill := math.max(z.fill, f)
+            invalid = z.dir == 1 ? close < z.bot : close > z.top
+            z.st := invalid ? "INVALID" : z.fill >= fvgMitigIn ? "FULL" : z.fill > 0 ? "PARTIAL" : "ACTIVE"
+        if not na(z.bx)
+            if z.st == "INVALID" or (bar_index - z.bidx) > fvgMaxAge
+                box.delete(z.bx)
+                z.bx := na
+            else
+                box.set_right(z.bx, bar_index + 1)
+                box.set_bgcolor(z.bx, z.st == "FULL" ? color.new(cNeutral, 90) : zoneColor(z.kind, z.dir))
+
+// Most recent usable zone of a kind and direction.
+findZone(string kind, int dir) =>
+    Zone found = na
+    if array.size(zones) > 0
+        for i = array.size(zones) - 1 to 0
+            z = array.get(zones, i)
+            if na(found) and z.kind == kind and z.dir == dir and z.st != "INVALID" and z.st != "FULL" and (bar_index - z.bidx) <= fvgMaxAge
+                found := z
+    found
+
+// =============================================================================
+// LIQUIDITY POOLS AND SWEEPS
+// A sweep is not a break. Price must trade through the level, show rejection,
+// and reclaim the level inside the reclaim window. Otherwise it is acceptance.
+// =============================================================================
+
+var array<Pool> pools = array.new<Pool>()
+
+addPool(string kind, float lvl, int side, int strength) =>
+    if not na(lvl)
+        merged = false
+        if array.size(pools) > 0
+            for i = 0 to array.size(pools) - 1
+                p = array.get(pools, i)
+                if not merged and p.side == side and math.abs(p.lvl - lvl) <= eqTolIn
+                    // Two levels within tolerance are one pool of equal highs / lows.
+                    p.lvl := (p.lvl * p.strength + lvl) / (p.strength + 1)
+                    p.strength := p.strength + 1
+                    p.kind := p.kind == kind ? kind : (side == 1 ? "EQH" : "EQL")
+                    merged := true
+        if not merged and array.size(pools) < 24
+            array.push(pools, Pool.new(kind = kind, lvl = lvl, side = side, st = "IDENTIFIED", penBar = na, penDepth = 0.0, wick = false, recBar = na, strength = strength))
+
+// --- daily reset and pool construction ---------------------------------------
+var bool poolsBuilt = false
+if newDay
+    array.clear(pools)
+    poolsBuilt := false
+
+if orbLocked and not poolsBuilt
+    if useORBHL
+        addPool("ORBH", orbH, 1, 3)
+        addPool("ORBL", orbL, -1, 3)
+    if usePDH
+        addPool("PDH", pdH, 1, 3)
+        addPool("PDL", pdL, -1, 3)
+    if useONHL
+        addPool("ONH", onH, 1, 2)
+        addPool("ONL", onL, -1, 2)
+    poolsBuilt := true
+
+// Confirmed swings become pools too, once the range is locked.
+if poolsBuilt and useSwings and not na(ph)
+    addPool("SWH", ph, 1, 1)
+if poolsBuilt and useSwings and not na(pl)
+    addPool("SWL", pl, -1, 1)
+
+// --- sweep state machine, per pool -------------------------------------------
+var bool  swpFired    = false     // a qualified sweep completed on this bar
+var string swpKind    = ""
+var float swpLevel    = na
+var int   swpSide     = 0
+var float swpExtreme  = na
+var int   swpBar      = na
+var bool  swpWick     = false
+var int   swpStrength = 0
+var bool  orbHiTaken  = false
+var bool  orbLoTaken  = false
+
+swpFired := false
+
+countable = not bothSwExec or inExec
+
+if confirmed and array.size(pools) > 0
+    for i = 0 to array.size(pools) - 1
+        p = array.get(pools, i)
+        if p.st == "IDENTIFIED"
+            pen = p.side == 1 ? high - p.lvl : p.lvl - low
+            if pen >= penMinIn and pen > 0
+                p.st := "SWEPT"
+                p.penBar := bar_index
+                p.penDepth := pen
+                p.wick := p.side == 1 ? abnUp : abnDn
+                if countable
+                    if p.kind == "ORBH"
+                        orbHiTaken := true
+                    if p.kind == "ORBL"
+                        orbLoTaken := true
+        else if p.st == "SWEPT"
+            // deepen the recorded excursion while the sweep is live
+            pen2 = p.side == 1 ? high - p.lvl : p.lvl - low
+            p.penDepth := math.max(p.penDepth, pen2)
+            p.wick := p.wick or (p.side == 1 ? abnUp : abnDn)
+            reclaimed = p.side == 1 ? close < p.lvl : close > p.lvl
+            withinWindow = (bar_index - p.penBar) <= reclaimBar
+            wickOk = not reqWickIn or p.wick
+            closeBackOk = not reqCloseBk or reclaimed
+            if withinWindow and reclaimed and wickOk and closeBackOk
+                p.st := "RECLAIMED"
+                p.recBar := bar_index
+                swpFired := true
+                swpKind := p.kind
+                swpLevel := p.lvl
+                swpSide := p.side
+                swpExtreme := p.side == 1 ? p.lvl + p.penDepth : p.lvl - p.penDepth
+                swpBar := bar_index
+                swpWick := p.wick
+                swpStrength := p.strength
+            else if not withinWindow
+                p.st := "FAILED"
+
+bothSwept = orbHiTaken and orbLoTaken
+bothSweptBlocks = bothSwept and bothSwActn == "NO TRADE"
+
+// Human-readable summary of the pools that matter right now.
+liqSummary() =>
+    string s = ""
+    if array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            p = array.get(pools, i)
+            if p.st == "SWEPT" or p.st == "RECLAIMED"
+                s := s == "" ? p.kind : s + " · " + p.kind
+    s == "" ? "MAPPED · UNTOUCHED" : s
+
+sweepStateTxt = swpFired ? "CONFIRMED" : bothSwept ? "BOTH SIDES" : orbHiTaken ? "ORB HIGH" : orbLoTaken ? "ORB LOW" : "NONE"
+
+// =============================================================================
+// BIAS — a directional working assumption with a magnitude, never a prediction.
+// Computed from levels available on this chart only; no higher-timeframe call
+// is made anywhere in this script, so nothing can leak backwards.
+// =============================================================================
+
+bwSum = math.max(1, bwDayOpen + bwMidOpen + bwPdPos + bwPdClose + bwOn + bwLiqObj)
+pdRange = na(pdH) or na(pdL) ? na : math.max(pdH - pdL, syminfo.mintick)
+refScale = na(pdRange) ? math.max(atr * 10, syminfo.mintick) : pdRange
+
+bScore = 0.0
+if not na(dOpen)
+    bScore += bwDayOpen * math.max(-1.0, math.min(1.0, (close - dOpen) / (0.5 * refScale)))
+if not na(midnightET)
+    bScore += bwMidOpen * math.max(-1.0, math.min(1.0, (close - midnightET) / (0.5 * refScale)))
+if not na(pdRange)
+    bScore += bwPdPos * math.max(-1.0, math.min(1.0, ((close - pdL) / pdRange - 0.5) * 2.0))
+    bScore += bwPdClose * math.max(-1.0, math.min(1.0, ((pdC - pdL) / pdRange - 0.5) * 2.0))
+if not na(onH) and not na(onL) and not na(pdRange)
+    onMid = (onH + onL) / 2.0
+    pdMid = (pdH + pdL) / 2.0
+    bScore += bwOn * math.max(-1.0, math.min(1.0, (onMid - pdMid) / (0.5 * pdRange)))
+if not na(onH) and not na(onL) and not na(pdH) and not na(pdL)
+    upObj = math.min(math.abs(onH - close), math.abs(pdH - close))
+    dnObj = math.min(math.abs(close - onL), math.abs(close - pdL))
+    tot = upObj + dnObj
+    // Closer untapped liquidity above implies an upside objective.
+    bScore += tot > 0 ? bwLiqObj * ((dnObj - upObj) / tot) : 0.0
+
+biasScore = 100.0 * bScore / bwSum
+biasTxt = biasScore >= biasThIn ? "BULLISH" : biasScore <= -biasThIn ? "BEARISH" : "NEUTRAL"
+biasDir = biasScore >= biasThIn ? 1 : biasScore <= -biasThIn ? -1 : 0
+
+// =============================================================================
+// PREMIUM / DISCOUNT AND KEY OPENS
+// =============================================================================
+
+locTxt = na(orbEq) ? "—" : math.abs(close - orbEq) <= eqBandIn ? "EQUILIBRIUM" : close < orbEq ? "DISCOUNT" : "PREMIUM"
+locDir = na(orbEq) ? 0 : math.abs(close - orbEq) <= eqBandIn ? 0 : close < orbEq ? -1 : 1
+
+keyOpenNear(float px) =>
+    string hit = ""
+    if not na(dOpen) and math.abs(px - dOpen) <= keyOpenProx
+        hit := "DAY OPEN"
+    if hit == "" and not na(midnightET) and math.abs(px - midnightET) <= keyOpenProx
+        hit := "MIDNIGHT ET"
+    if hit == "" and not na(open0830) and math.abs(px - open0830) <= keyOpenProx
+        hit := "08:30 ET OPEN"
+    if hit == "" and not na(open0930) and math.abs(px - open0930) <= keyOpenProx
+        hit := "09:30 ET OPEN"
+    hit
+
+// =============================================================================
+// SETUP CONTEXT AND STATE MACHINE
+// State advances only on confirmed bars. Every exit from a setup records a
+// reason, so the model can always answer "what is missing?".
+// =============================================================================
+
+var string state       = "PRE_MARKET"
+var string nextCond    = "WAIT FOR OPENING RANGE"
+var int    setupSeq    = 0
+var string setupId     = "NONE"
+var int    sDir        = 0
+var string setupType   = "—"
+
+var string sSweepKind  = ""
+var float  sSweepLevel = na
+var float  sSweepExt   = na
+var int    sSweepBar   = na
+var bool   sWick       = false
+var int    sStrength   = 0
+
+var float  sDispScore  = na
+var int    sDispBar    = na
+var int    sDispBars   = 0
+
+var bool   sHasFvg     = false
+var float  sFvgTop     = na
+var float  sFvgBot     = na
+var bool   sHasOb      = false
+var float  sObTop      = na
+var float  sObBot      = na
+var bool   sHasRb      = false
+var float  sRbTop      = na
+var float  sRbBot      = na
+var bool   sStruct     = false
+var int    sStructBar  = na
+
+var float  zTop        = na
+var float  zBot        = na
+var string zKind       = "—"
+
+var float  sEntry      = na
+var float  sStop       = na
+var float  sTp1        = na
+var float  sTp2        = na
+var float  sR          = na
+var string sTp2Src     = "—"
+var float  sTrail      = na
+
+var int    sConf       = 0
+var float  sQual       = 0.0
+var bool   sPathClear  = true
+var float  sPathSev    = 0.0
+var bool   sConfirmOk  = false
+var string sConfirmSrc = "—"
+var float  sMfeR       = 0.0
+var int    sRetestBar  = na
+var string sInvalidTxt = "—"
+var string dayDoneTxt  = "—"
+var int    milestone   = 0
+var string lastEventTx = "—"
+var bool   eventFired  = false
+
+// Confluence factor flags, kept as separate booleans by design.
+var bool cSweep = false
+var bool cDisp  = false
+var bool cFvg   = false
+var bool cOb    = false
+var bool cRb    = false
+var bool cBias  = false
+var bool cPd    = false
+var bool cKey   = false
+var bool cPath  = false
+var string cKeyName = ""
+
+var bool doReset = false
+
+if newDay
+    state := "PRE_MARKET"
+    nextCond := "WAIT FOR OPENING RANGE"
+    setupSeq := 0
+    setupId := "NONE"
+    sInvalidTxt := "—"
+    dayDoneTxt := "—"
+    lastEventTx := "—"
+    orbHiTaken := false
+    orbLoTaken := false
+    doReset := true
+
+// -----------------------------------------------------------------------------
+// Order block and rejection block construction, once a leg has qualified.
+// -----------------------------------------------------------------------------
+buildOrderBlock(int dir, int legBars) =>
+    float t = na
+    float b = na
+    found = false
+    for k = legBars to legBars + obLookback
+        if not found
+            opposing = dir == 1 ? close[k] < open[k] : close[k] > open[k]
+            if opposing
+                bodyTop = math.max(open[k], close[k])
+                bodyBot = math.min(open[k], close[k])
+                if obModeIn == "Body only"
+                    t := bodyTop
+                    b := bodyBot
+                else if obModeIn == "Full range"
+                    t := high[k]
+                    b := low[k]
+                else
+                    t := dir == 1 ? bodyTop : high[k]
+                    b := dir == 1 ? low[k] : bodyBot
+                found := true
+    [t, b, found]
+
+// -----------------------------------------------------------------------------
+// Target path: opposing zones sitting between the entry and TP2.
+// -----------------------------------------------------------------------------
+pathSeverity(float entry, float tp1, float tp2, int dir, float r) =>
+    float sev = 0.0
+    if not na(entry) and not na(tp2) and r > 0 and array.size(zones) > 0
+        lo = math.min(entry, tp2)
+        hi = math.max(entry, tp2)
+        for i = 0 to array.size(zones) - 1
+            z = array.get(zones, i)
+            if z.dir == -dir and (z.st == "ACTIVE" or z.st == "PARTIAL")
+                mid = (z.top + z.bot) / 2.0
+                if mid > lo and mid < hi
+                    beforeTp1 = dir == 1 ? mid <= tp1 : mid >= tp1
+                    sev += ((z.top - z.bot) / r) * (beforeTp1 ? 2.0 : 1.0)
+    sev
+
+var float sLegHi = na
+var float sLegLo = na
+
+// -----------------------------------------------------------------------------
+// Alert message builder. JSON emits the documented Northstar event envelope so
+// a webhook backend can be added later without touching this script.
+// -----------------------------------------------------------------------------
+evMsg(string typ, string reason, int ms) =>
+    q = '"'
+    alertFmt == "JSON" ? '{' + q + 'schema_version' + q + ':' + q + '1.0' + q + ',' + q + 'session_id' + q + ':' + q + sessionDate + '-' + syminfo.ticker + q + ',' + q + 'setup_id' + q + ':' + q + setupId + q + ',' + q + 'type' + q + ':' + q + typ + q + ',' + q + 'milestone' + q + ':' + str.tostring(ms) + ',' + q + 'symbol' + q + ':' + q + syminfo.ticker + q + ',' + q + 'state' + q + ':' + q + state + q + ',' + q + 'price' + q + ':' + str.tostring(close) + ',' + q + 'direction' + q + ':' + q + (sDir == 1 ? "LONG" : sDir == -1 ? "SHORT" : "NONE") + q + ',' + q + 'reason' + q + ':' + q + reason + q + ',' + q + 'confluence' + q + ':' + str.tostring(sConf) + ',' + q + 'quality_score' + q + ':' + str.tostring(math.round(sQual)) + ',' + q + 'next_condition' + q + ':' + q + nextCond + q + '}' : "NORTHSTAR CAPITAL\n" + typ + " · " + syminfo.ticker + "\n" + reason + "\nSTATE: " + state + "\nCONFLUENCE: " + str.tostring(sConf) + "/9   QUALITY: " + str.tostring(math.round(sQual)) + "/100\nNEXT: " + nextCond
+
+// =============================================================================
+// STATE MACHINE
+// =============================================================================
+
+if confirmed
+    // ---- deferred reset from the previous bar --------------------------------
+    if doReset
+        sDir := 0
+        setupType := "—"
+        sSweepKind := ""
+        sSweepLevel := na
+        sSweepExt := na
+        sSweepBar := na
+        sWick := false
+        sStrength := 0
+        sDispScore := na
+        sDispBar := na
+        sDispBars := 0
+        sHasFvg := false
+        sFvgTop := na
+        sFvgBot := na
+        sHasOb := false
+        sObTop := na
+        sObBot := na
+        sHasRb := false
+        sRbTop := na
+        sRbBot := na
+        sStruct := false
+        sStructBar := na
+        zTop := na
+        zBot := na
+        zKind := "—"
+        sEntry := na
+        sStop := na
+        sTp1 := na
+        sTp2 := na
+        sR := na
+        sTp2Src := "—"
+        sTrail := na
+        sConf := 0
+        sQual := 0.0
+        sPathClear := true
+        sPathSev := 0.0
+        sConfirmOk := false
+        sConfirmSrc := "—"
+        sMfeR := 0.0
+        sRetestBar := na
+        sLegHi := na
+        sLegLo := na
+        milestone := 0
+        cSweep := false
+        cDisp := false
+        cFvg := false
+        cOb := false
+        cRb := false
+        cBias := false
+        cPd := false
+        cKey := false
+        cPath := false
+        cKeyName := ""
+        doReset := false
+
+    // ---- live scoring, so the dashboard is never stale -----------------------
+    if not na(sEntry) and not na(sR) and sR > 0
+        sPathSev := pathSeverity(sEntry, sTp1, sTp2, sDir, sR)
+        sPathClear := sPathSev <= pathClearIn
+        cSweep := sSweepBar >= 0
+        cDisp  := not na(sDispScore) and sDispScore >= dispMinIn
+        cFvg   := sHasFvg
+        cOb    := sHasOb
+        cRb    := sHasRb
+        cBias  := biasDir != 0 and biasDir == sDir
+        cPd    := (sDir == 1 and locDir == -1) or (sDir == -1 and locDir == 1)
+        cKeyName := keyOpenNear(sEntry)
+        cKey   := cKeyName != ""
+        cPath  := sPathClear
+        sConf := (cSweep ? 1 : 0) + (cDisp ? 1 : 0) + (cFvg ? 1 : 0) + (cOb ? 1 : 0) + (cRb ? 1 : 0) + (cBias ? 1 : 0) + (cPd ? 1 : 0) + (cKey ? 1 : 0) + (cPath ? 1 : 0)
+
+        qwSum = math.max(1, qwContext + qwLiq + qwDisp + qwStruct + qwRetest + qwConfirm + qwConf + qwRisk + qwTarget)
+        qCtx   = cBias ? clamp01(math.abs(biasScore) / 100.0) : 0.0
+        qLiq   = clamp01(sStrength / 3.0) * (sWick ? 1.0 : 0.7)
+        qDsp   = clamp01(nz(sDispScore) / 100.0)
+        qStr   = sStruct ? 1.0 : 0.0
+        qRet   = clamp01(1.0 - sMfeR / math.max(mfeMaxRIn, 0.01))
+        qCfm   = sConfirmOk ? 1.0 : 0.0
+        qCnf   = clamp01(sConf / 9.0)
+        qRsk   = na(orbRange) or orbRange <= 0 ? 0.5 : clamp01((stopOrbFrac * orbRange - sR) / math.max(stopOrbFrac * orbRange, 1.0))
+        qTgt   = sPathClear ? clamp01(math.abs(nz(sTp2) - sEntry) / math.max(sR * 4.0, 0.01)) : 0.0
+        sQual := 100.0 * (qwContext * qCtx + qwLiq * qLiq + qwDisp * qDsp + qwStruct * qStr + qwRetest * qRet + qwConfirm * qCfm + qwConf * qCnf + qwRisk * qRsk + qwTarget * qTgt) / qwSum
+
+    // ---- 1 · pre-market ------------------------------------------------------
+    if state == "PRE_MARKET"
+        nextCond := "WAIT FOR OPENING RANGE"
+        if inORB
+            state := "BUILDING_ORB"
+            nextCond := "OPENING RANGE BUILDING · LOCKS AT WINDOW CLOSE"
+
+    // ---- 2 · opening range ---------------------------------------------------
+    else if state == "BUILDING_ORB"
+        nextCond := "OPENING RANGE BUILDING · LOCKS AT WINDOW CLOSE"
+        if orbLocked
+            milestone := 2
+            if orbValid
+                state := "ORB_LOCKED"
+                nextCond := "WAIT FOR EXECUTION WINDOW"
+            else
+                state := "RANGE_INVALID"
+                dayDoneTxt := orbRange < orbMinIn ? "ORB TOO SMALL" : "ORB TOO LARGE"
+                nextCond := "NO TRADE TODAY · RANGE INVALID"
+            if alOrb
+                alert(evMsg("ORB_LOCKED", "Range " + n2(orbRange) + " pts · " + orbStatus, 2), alert.freq_once_per_bar_close)
+                eventFired := true
+                lastEventTx := "ORB LOCKED"
+
+    else if state == "RANGE_INVALID"
+        nextCond := "NO TRADE TODAY · RANGE INVALID"
+        if pastFlat
+            state := "DAY_DONE"
+
+    // ---- 3 · waiting for the execution window --------------------------------
+    else if state == "ORB_LOCKED"
+        milestone := 3
+        nextCond := "WAIT FOR EXECUTION WINDOW"
+        if inExec
+            state := "MONITORING_LIQUIDITY"
+            nextCond := "WAIT FOR A ONE-SIDED LIQUIDITY SWEEP"
+
+    // ---- 4 · monitoring ------------------------------------------------------
+    else if state == "MONITORING_LIQUIDITY"
+        nextCond := bothSweptBlocks ? "BOTH SIDES SWEPT · STAND DOWN" : "WAIT FOR A ONE-SIDED LIQUIDITY SWEEP"
+        if bothSweptBlocks
+            state := "DAY_DONE"
+            dayDoneTxt := "BOTH SIDES SWEPT"
+        else if swpFired
+            setupSeq := setupSeq + 1
+            setupId := sessionDate + "-" + syminfo.ticker + "-SETUP" + (setupSeq < 10 ? "00" : setupSeq < 100 ? "0" : "") + str.tostring(setupSeq)
+            sDir := -swpSide
+            sSweepKind := swpKind
+            sSweepLevel := swpLevel
+            sSweepExt := swpExtreme
+            sSweepBar := swpBar
+            sWick := swpWick
+            sStrength := swpStrength
+            sInvalidTxt := "—"
+            state := "LIQUIDITY_SWEPT"
+            milestone := 4
+            nextCond := "WAIT FOR DISPLACEMENT AGAINST THE SWEEP"
+            if alSweep
+                alert(evMsg("LIQUIDITY_SWEPT", swpKind + " swept at " + f2(swpLevel) + " · reclaim confirmed" + (swpWick ? " · abnormal wick" : ""), 4), alert.freq_once_per_bar_close)
+                eventFired := true
+                lastEventTx := "LIQUIDITY SWEPT · " + swpKind
+        else if not inExec or pastFlat
+            state := "DAY_DONE"
+            dayDoneTxt := pastFlat ? "SESSION FLAT" : "EXECUTION WINDOW CLOSED"
+
+    // ---- 5 · displacement ----------------------------------------------------
+    else if state == "LIQUIDITY_SWEPT"
+        nextCond := "WAIT FOR DISPLACEMENT AGAINST THE SWEEP"
+        if dispQualified and bestDir == sDir
+            sDispScore := bestScore
+            sDispBar := bar_index
+            sDispBars := bestBars
+            sLegHi := bestHi
+            sLegLo := bestLo
+            setupType := sWick and (bar_index - sSweepBar) <= 5 ? "NEWS REVERSAL" : "CONTINUATION"
+            state := "DISPLACEMENT_DETECTED"
+            milestone := 6
+            nextCond := fvgReqSetup ? "WAIT FOR FAIR VALUE GAP" : "WAIT FOR STRUCTURE"
+            if alDisp
+                alert(evMsg("DISPLACEMENT", "Displacement " + str.tostring(math.round(bestScore)) + "/100 (" + dispClass + ") " + (sDir == 1 ? "bullish" : "bearish"), 6), alert.freq_once_per_bar_close)
+                eventFired := true
+                lastEventTx := "DISPLACEMENT " + str.tostring(math.round(bestScore))
+        else if (bar_index - sSweepBar) > dispWaitIn
+            sInvalidTxt := "NO DISPLACEMENT"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+
+    // ---- 6 · imbalance -------------------------------------------------------
+    else if state == "DISPLACEMENT_DETECTED"
+        fz = findZone("FVG", sDir)
+        if not na(fz)
+            sHasFvg := true
+            sFvgTop := fz.top
+            sFvgBot := fz.bot
+        if sHasFvg or not fvgReqSetup
+            state := "IMBALANCE_CREATED"
+            milestone := 7
+            nextCond := "WAIT FOR STRUCTURE CONFIRMATION"
+        else if (bar_index - sDispBar) > strTimeout
+            sInvalidTxt := "NO FVG"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+
+    // ---- 7 · structure -------------------------------------------------------
+    else if state == "IMBALANCE_CREATED"
+        nextCond := "WAIT FOR STRUCTURE CONFIRMATION"
+        if not na(lastBreakBar) and lastBreakDir == sDir and lastBreakBar >= sSweepBar
+            sStruct := true
+            sStructBar := lastBreakBar
+            state := "STRUCTURE_CONFIRMED"
+            milestone := 8
+            nextCond := "BUILD RETEST ZONE"
+        else if (bar_index - sDispBar) > strTimeout
+            sInvalidTxt := "NO STRUCTURE"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+
+    // ---- 8 · build the plan and wait for a retest ----------------------------
+    else if state == "STRUCTURE_CONFIRMED"
+        [obT, obB, obFound] = buildOrderBlock(sDir, math.max(1, sDispBars))
+        sHasOb := obFound
+        sObTop := obT
+        sObBot := obB
+        off = bar_index - sSweepBar
+        if sWick and off >= 0 and off < 480
+            sHasRb := true
+            sRbTop := sDir == 1 ? math.min(open[off], close[off]) : high[off]
+            sRbBot := sDir == 1 ? low[off] : math.max(open[off], close[off])
+        // zone selection: preferred first, then the documented fallback order
+        float ztmp = na
+        float zbmp = na
+        string zk = "—"
+        if zonePrefIn == "FVG midpoint" and sHasFvg
+            m = (sFvgTop + sFvgBot) / 2.0
+            ztmp := m + zonePadIn
+            zbmp := m - zonePadIn
+            zk := "FVG MIDPOINT"
+        else if zonePrefIn == "FVG near edge" and sHasFvg
+            e = sDir == 1 ? sFvgTop : sFvgBot
+            ztmp := e + zonePadIn
+            zbmp := e - zonePadIn
+            zk := "FVG EDGE"
+        else if zonePrefIn == "Order block" and sHasOb
+            ztmp := sObTop
+            zbmp := sObBot
+            zk := "ORDER BLOCK"
+        else if zonePrefIn == "Rejection block" and sHasRb
+            ztmp := sRbTop
+            zbmp := sRbBot
+            zk := "REJECTION BLOCK"
+        if na(ztmp) and sHasFvg
+            m = (sFvgTop + sFvgBot) / 2.0
+            ztmp := m + zonePadIn
+            zbmp := m - zonePadIn
+            zk := "FVG MIDPOINT"
+        if na(ztmp) and sHasOb
+            ztmp := sObTop
+            zbmp := sObBot
+            zk := "ORDER BLOCK"
+        if na(ztmp) and sHasRb
+            ztmp := sRbTop
+            zbmp := sRbBot
+            zk := "REJECTION BLOCK"
+        if na(ztmp) and not na(sSweepLevel)
+            ztmp := sSweepLevel + zonePadIn
+            zbmp := sSweepLevel - zonePadIn
+            zk := "BROKEN LEVEL"
+        zTop := ztmp
+        zBot := zbmp
+        zKind := zk
+        sEntry := sDir == 1 ? zTop : zBot
+        sStop := sDir == 1 ? sSweepExt - stopBufIn : sSweepExt + stopBufIn
+        sR := math.abs(sEntry - sStop)
+        sTp1 := sDir == 1 ? sEntry + tp1RIn * sR : sEntry - tp1RIn * sR
+        oppOrb = sDir == 1 ? orbH : orbL
+        oppR = na(oppOrb) or sR <= 0 ? na : math.abs(oppOrb - sEntry) / sR
+        if tp2ModeIn == "Fixed 4R"
+            sTp2 := sDir == 1 ? sEntry + tp2RIn * sR : sEntry - tp2RIn * sR
+            sTp2Src := "FIXED " + n2(tp2RIn) + "R"
+        else if tp2ModeIn == "Measured move"
+            mm = math.max(nz(sLegHi) - nz(sLegLo), sR)
+            sTp2 := sDir == 1 ? sEntry + mm : sEntry - mm
+            sTp2Src := "MEASURED MOVE"
+        else
+            if not na(oppR) and oppR >= tp2MinRIn
+                sTp2 := oppOrb
+                sTp2Src := "OPPOSITE ORB"
+            else
+                sTp2 := sDir == 1 ? sEntry + tp2RIn * sR : sEntry - tp2RIn * sR
+                sTp2Src := "FIXED " + n2(tp2RIn) + "R"
+        state := "WAITING_FOR_RETEST"
+        nextCond := "RETEST INTO " + zKind + " · " + f2(zBot) + "–" + f2(zTop)
+
+    // ---- 9 · retest ----------------------------------------------------------
+    else if state == "WAITING_FOR_RETEST"
+        mfe = sR > 0 ? (sDir == 1 ? (high - sEntry) / sR : (sEntry - low) / sR) : 0.0
+        sMfeR := math.max(sMfeR, mfe)
+        touched = low <= zTop and high >= zBot
+        if touched
+            sRetestBar := bar_index
+            state := "RETEST_DETECTED"
+            milestone := 9
+            nextCond := "ZONE MUST HOLD ON CLOSE"
+            if alRetest
+                alert(evMsg("RETEST_DETECTED", "Retest into " + zKind + " " + f2(zBot) + "–" + f2(zTop), 9), alert.freq_once_per_bar_close)
+                lastEventTx := "RETEST · " + zKind
+        else if sMfeR > mfeMaxRIn
+            sInvalidTxt := "MOVED " + n2(sMfeR) + "R BEFORE RETEST"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if (bar_index - sDispBar) > retestTmOut
+            sInvalidTxt := "NO RETEST"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if pastFlat or not inExec
+            sInvalidTxt := "SESSION CLOSED"
+            state := "DAY_DONE"
+            dayDoneTxt := "SESSION CLOSED"
+            doReset := true
+
+    // ---- 10 · zone must hold -------------------------------------------------
+    else if state == "RETEST_DETECTED"
+        failed = sDir == 1 ? close < zBot - failBufIn : close > zTop + failBufIn
+        if failed
+            sInvalidTxt := "RETEST FAILED"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else
+            state := "CONFIRMATION_PENDING"
+            nextCond := "WAIT FOR CONFIRMATION IN THE ZONE"
+
+    // ---- 11 · confirmation ---------------------------------------------------
+    else if state == "CONFIRMATION_PENDING"
+        rejCandle = sDir == 1 ? (low <= zTop and close > open and dnWickR >= rbWickIn) : (high >= zBot and close < open and upWickR >= rbWickIn)
+        structAfter = not na(lastBreakBar) and lastBreakDir == sDir and lastBreakBar >= sRetestBar
+        reclaimZone = sDir == 1 ? close > zTop : close < zBot
+        failed = sDir == 1 ? close < zBot - failBufIn : close > zTop + failBufIn
+        if failed
+            sInvalidTxt := "RETEST FAILED"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if rejCandle or structAfter or reclaimZone
+            sConfirmOk := true
+            sConfirmSrc := structAfter ? "STRUCTURE" : rejCandle ? "REJECTION" : "ZONE RECLAIM"
+            state := "CONFLUENCE_CHECK"
+            milestone := 10
+            nextCond := "CONFLUENCE AND QUALITY CHECK"
+        else if (bar_index - sRetestBar) > strTimeout
+            sInvalidTxt := "NO CONFIRMATION"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+
+    // ---- 12 · confluence and quality ----------------------------------------
+    else if state == "CONFLUENCE_CHECK"
+        pathBad = pathBlockIn and not sPathClear
+        if sConf < confMinIn
+            sInvalidTxt := "CONFLUENCE " + str.tostring(sConf) + "/9 BELOW " + str.tostring(confMinIn)
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if sQual < qualMinIn
+            sInvalidTxt := "QUALITY " + str.tostring(math.round(sQual)) + " BELOW " + str.tostring(qualMinIn)
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if pathBad
+            sInvalidTxt := "TARGET OBSTRUCTED"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else
+            state := "RISK_CHECK"
+            milestone := 11
+            nextCond := "RISK VALIDATION"
+
+    // ---- 13 · risk (display only; filters are optional) ----------------------
+    else if state == "RISK_CHECK"
+        stopBad = useStopFlt and (sR < stopMinIn or sR > stopMaxIn or (not na(orbRange) and sR > stopOrbFrac * orbRange))
+        if stopBad
+            sInvalidTxt := "STOP " + n2(sR) + " PTS OUTSIDE LIMITS"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else
+            state := "ENTRY_READY"
+            milestone := 13
+            nextCond := "ENTRY " + f2(sEntry) + " · STOP " + f2(sStop)
+            if alEntry
+                alert(evMsg("ENTRY_READY", setupType + " " + (sDir == 1 ? "LONG" : "SHORT") + " · entry " + f2(sEntry) + " · stop " + f2(sStop) + " (" + n2(sR) + " pts) · TP1 " + f2(sTp1) + " · TP2 " + f2(sTp2) + " · DISPLAY ONLY, NO ORDER PLACED", 13), alert.freq_once_per_bar_close)
+                lastEventTx := "ENTRY READY · " + (sDir == 1 ? "LONG" : "SHORT")
+
+    // ---- 14 · hypothetical fill tracking, for review only --------------------
+    else if state == "ENTRY_READY"
+        stopFirst = sDir == 1 ? low <= sStop : high >= sStop
+        missed = sDir == 1 ? high >= sTp1 : low <= sTp1
+        filled = sDir == 1 ? low <= sEntry : high >= sEntry
+        if stopFirst
+            sInvalidTxt := "STOP TOUCHED BEFORE ENTRY"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if filled
+            state := "IN_TRADE"
+            nextCond := "TP1 " + f2(sTp1) + " · STOP " + f2(sStop)
+        else if missed
+            sInvalidTxt := "PRICE REACHED TP1 WITHOUT A FILL"
+            state := "MONITORING_LIQUIDITY"
+            doReset := true
+        else if pastFlat or not inExec
+            sInvalidTxt := "SESSION CLOSED"
+            state := "DAY_DONE"
+            dayDoneTxt := "SESSION CLOSED"
+            doReset := true
+
+    else if state == "IN_TRADE"
+        hitStop = sDir == 1 ? low <= sStop : high >= sStop
+        hitTp1  = sDir == 1 ? high >= sTp1 : low <= sTp1
+        if hitStop
+            sInvalidTxt := "STOPPED · −1.0R"
+            lastEventTx := "STOPPED"
+            state := inExec and not pastFlat ? "MONITORING_LIQUIDITY" : "DAY_DONE"
+            doReset := true
+        else if hitTp1
+            sTrail := sStop
+            state := "TP1_HIT"
+            milestone := 14
+            nextCond := "RUNNER · TRAIL BEHIND CONFIRMED 1-MINUTE STRUCTURE"
+            lastEventTx := "TP1 HIT · +" + n2(tp1RIn) + "R"
+        else if pastFlat
+            sInvalidTxt := "FLAT AT SESSION END"
+            state := "DAY_DONE"
+            dayDoneTxt := "SESSION FLAT"
+            doReset := true
+
+    else if state == "TP1_HIT"
+        sTrail := sEntry
+        state := "RUNNER_ACTIVE"
+        milestone := 15
+
+    else if state == "RUNNER_ACTIVE"
+        // trail behind the most recent confirmed pivot; never loosen
+        cand = sDir == 1 ? lastPL : lastPH
+        if not na(cand)
+            sTrail := sDir == 1 ? math.max(nz(sTrail, cand), cand) : math.min(nz(sTrail, cand), cand)
+        hitTrail = sDir == 1 ? low <= sTrail : high >= sTrail
+        hitTp2 = sDir == 1 ? high >= sTp2 : low <= sTp2
+        if hitTp2
+            sInvalidTxt := "TP2 REACHED"
+            lastEventTx := "TP2 REACHED"
+            state := inExec and not pastFlat ? "MONITORING_LIQUIDITY" : "DAY_DONE"
+            doReset := true
+        else if hitTrail
+            sInvalidTxt := "TRAILED OUT"
+            lastEventTx := "TRAILED OUT"
+            state := inExec and not pastFlat ? "MONITORING_LIQUIDITY" : "DAY_DONE"
+            doReset := true
+        else if pastFlat
+            sInvalidTxt := "FLAT AT SESSION END"
+            state := "DAY_DONE"
+            dayDoneTxt := "SESSION FLAT"
+            doReset := true
+
+    // ---- 15 · day complete ---------------------------------------------------
+    else if state == "DAY_DONE"
+        nextCond := "SESSION COMPLETE · NO FURTHER SIGNALS"
+
+    // ---- global session guard ------------------------------------------------
+    if pastFlat and state != "DAY_DONE" and state != "PRE_MARKET"
+        state := "DAY_DONE"
+        dayDoneTxt := dayDoneTxt == "—" ? "SESSION FLAT" : dayDoneTxt
+        nextCond := "SESSION COMPLETE · NO FURTHER SIGNALS"
+
+    // ---- invalidation and day-complete alerts --------------------------------
+    if alInval and doReset and sInvalidTxt != "—" and sInvalidTxt != ""
+        alert(evMsg("INVALIDATION", sInvalidTxt, milestone), alert.freq_once_per_bar_close)
+        lastEventTx := "INVALIDATED · " + sInvalidTxt
+    if alDayDone and state == "DAY_DONE" and state[1] != "DAY_DONE"
+        alert(evMsg("DAY_DONE", dayDoneTxt, 17), alert.freq_once_per_bar_close)
+
+// =============================================================================
+// VISUALS
+// =============================================================================
+
+newSweepMk   = swpFired
+newDispMk    = state == "DISPLACEMENT_DETECTED" and state[1] != "DISPLACEMENT_DETECTED"
+newRetestMk  = state == "RETEST_DETECTED" and state[1] != "RETEST_DETECTED"
+newEntryMk   = state == "ENTRY_READY" and state[1] != "ENTRY_READY"
+
+plot(showLevels and not na(pdH) ? pdH : na, "PDH", color = cLevel, style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(pdL) ? pdL : na, "PDL", color = cLevel, style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(onH) ? onH : na, "Overnight high", color = color.new(cLevel, 35), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(onL) ? onL : na, "Overnight low", color = color.new(cLevel, 35), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(dOpen) ? dOpen : na, "Day open", color = color.new(cNeutral, 20), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(midnightET) ? midnightET : na, "Midnight ET open", color = color.new(cNeutral, 45), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(open0830) ? open0830 : na, "08:30 ET open", color = color.new(cNeutral, 45), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and not na(open0930) ? open0930 : na, "09:30 ET open", color = color.new(cNeutral, 45), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showLevels and orbLocked and not na(orbH) ? orbH : na, "ORB high", color = cORB, style = plot.style_linebr, linewidth = 2, display = display.pane)
+plot(showLevels and orbLocked and not na(orbL) ? orbL : na, "ORB low", color = cORB, style = plot.style_linebr, linewidth = 2, display = display.pane)
+plot(showLevels and orbLocked and not na(orbEq) ? orbEq : na, "Equilibrium", color = color.new(cORB, 60), style = plot.style_linebr, linewidth = 1, display = display.pane)
+
+plot(showPlan and not na(sEntry) ? sEntry : na, "Entry", color = cAccent, style = plot.style_linebr, linewidth = 2, display = display.pane)
+plot(showPlan and not na(sStop) ? sStop : na, "Stop", color = cBear, style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showPlan and not na(sTp1) ? sTp1 : na, "TP1", color = cBull, style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showPlan and not na(sTp2) ? sTp2 : na, "TP2", color = color.new(cBull, 40), style = plot.style_linebr, linewidth = 1, display = display.pane)
+plot(showPlan and state == "RUNNER_ACTIVE" and not na(sTrail) ? sTrail : na, "Trail", color = cAccent, style = plot.style_linebr, linewidth = 1, display = display.pane)
+
+// opening-range box
+var box orbBox = na
+if showORBBox and orbLocked and not orbLocked[1] and not na(orbH)
+    orbBox := box.new(nz(orbStartBar, bar_index), orbH, bar_index, orbL, border_color = color.new(cORB, 40), border_width = 1, bgcolor = color.new(cORB, 92))
+if not na(orbBox) and inExec
+    box.set_right(orbBox, bar_index + 1)
+
+// event markers
+plotshape(showEvents and newSweepMk and swpSide == -1, "Sweep low", shape.triangleup, location.belowbar, color = cBull, size = size.tiny, text = "SWEEP", textcolor = cBull)
+plotshape(showEvents and newSweepMk and swpSide == 1, "Sweep high", shape.triangledown, location.abovebar, color = cBear, size = size.tiny, text = "SWEEP", textcolor = cBear)
+plotshape(showEvents and newDispMk and sDir == 1, "Displacement up", shape.diamond, location.belowbar, color = cBull, size = size.tiny, text = "DISP", textcolor = cBull)
+plotshape(showEvents and newDispMk and sDir == -1, "Displacement down", shape.diamond, location.abovebar, color = cBear, size = size.tiny, text = "DISP", textcolor = cBear)
+plotshape(showEvents and newRetestMk and sDir == 1, "Retest long", shape.circle, location.belowbar, color = cAccent, size = size.tiny, text = "RETEST", textcolor = cAccent)
+plotshape(showEvents and newRetestMk and sDir == -1, "Retest short", shape.circle, location.abovebar, color = cAccent, size = size.tiny, text = "RETEST", textcolor = cAccent)
+plotshape(showEvents and newEntryMk and sDir == 1, "Entry ready long", shape.labelup, location.belowbar, color = cBull, size = size.small, text = "ENTRY READY", textcolor = color.white)
+plotshape(showEvents and newEntryMk and sDir == -1, "Entry ready short", shape.labeldown, location.abovebar, color = cBear, size = size.small, text = "ENTRY READY", textcolor = color.white)
+
+// right-edge level tags
+var label lbOrbH = na
+var label lbOrbL = na
+if showLabels and barstate.islast and orbLocked and not na(orbH)
+    if na(lbOrbH)
+        lbOrbH := label.new(bar_index, orbH, "ORB H", style = label.style_label_left, color = color.new(cORB, 80), textcolor = cORB, size = size.tiny)
+        lbOrbL := label.new(bar_index, orbL, "ORB L", style = label.style_label_left, color = color.new(cORB, 80), textcolor = cORB, size = size.tiny)
+    label.set_xy(lbOrbH, bar_index, orbH)
+    label.set_xy(lbOrbL, bar_index, orbL)
+
+// =============================================================================
+// DASHBOARD
+// =============================================================================
+
+tPos = dashPos == "Top left" ? position.top_left : dashPos == "Bottom right" ? position.bottom_right : dashPos == "Bottom left" ? position.bottom_left : dashPos == "Middle right" ? position.middle_right : position.top_right
+tSize = dashSize == "Tiny" ? size.tiny : dashSize == "Normal" ? size.normal : size.small
+
+dirColor(int d) =>
+    d == 1 ? cBull : d == -1 ? cBear : cNeutral
+
+okColor(bool b) =>
+    b ? cBull : cNeutral
+
+row(table t, int r, string k, string v, color vc) =>
+    table.cell(t, 0, r, k, text_color = cPanelDim, text_size = tSize, text_halign = text.align_left, bgcolor = cPanelBg)
+    table.cell(t, 1, r, v, text_color = vc, text_size = tSize, text_halign = text.align_right, bgcolor = cPanelBg)
+
+var table dash = table.new(tPos, 2, 34, bgcolor = cPanelBg, frame_color = color.new(cPanelDim, 60), frame_width = 1, border_color = color.new(cPanelDim, 85), border_width = 1)
+
+tfWarn = warnTfIn and timeframe.in_seconds() != 60
+
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "NORTHSTAR CAPITAL™", text_color = cPanelFg, text_size = tSize, text_halign = text.align_left, bgcolor = cPanelBg)
+    table.cell(dash, 1, 0, syminfo.ticker, text_color = cAccent, text_size = tSize, text_halign = text.align_right, bgcolor = cPanelBg)
+    table.cell(dash, 0, 1, "NORTHSTAR MOTION MODEL™", text_color = cPanelDim, text_size = tSize, text_halign = text.align_left, bgcolor = cPanelBg)
+    table.cell(dash, 1, 1, sessionDate, text_color = cPanelDim, text_size = tSize, text_halign = text.align_right, bgcolor = cPanelBg)
+
+    row(dash, 2,  "SESSION",          inORB ? "OPENING RANGE" : inExec ? "EXECUTION" : pastFlat ? "CLOSED" : "PRE-MARKET", inExec ? cBull : cNeutral)
+    row(dash, 3,  "ORB SIZE",         na(orbRange) ? "—" : n2(orbRange) + " PTS", cPanelFg)
+    row(dash, 4,  "ORB STATUS",       orbStatus, orbValid ? cBull : orbLocked ? cBear : cNeutral)
+    row(dash, 5,  "DAILY BIAS",       biasTxt, dirColor(biasDir))
+    row(dash, 6,  "BIAS SCORE",       sgn(biasScore), dirColor(biasDir))
+    row(dash, 7,  "LIQUIDITY",        liqSummary(), cPanelFg)
+    row(dash, 8,  "SWEEP",            sSweepKind == "" ? sweepStateTxt : sSweepKind + " @ " + f2(sSweepLevel), sSweepKind == "" ? cNeutral : dirColor(sDir))
+    row(dash, 9,  "DISPLACEMENT",     na(sDispScore) ? (dispClass == "NONE" ? "—" : dispClass + " " + str.tostring(math.round(bestScore))) : str.tostring(math.round(sDispScore)) + "/100", na(sDispScore) ? cNeutral : dirColor(sDir))
+    row(dash, 10, "FVG",              sHasFvg ? n2(sFvgTop - sFvgBot) + " PTS · " + f2(sFvgBot) + "–" + f2(sFvgTop) : "—", okColor(sHasFvg))
+    row(dash, 11, "ORDER BLOCK",      sHasOb ? f2(sObBot) + "–" + f2(sObTop) : "—", okColor(sHasOb))
+    row(dash, 12, "REJECTION BLOCK",  sHasRb ? f2(sRbBot) + "–" + f2(sRbTop) : "—", okColor(sHasRb))
+    row(dash, 13, "STRUCTURE",        sStruct ? structureLabel : (na(lastBreakBar) ? "—" : structureLabel), okColor(sStruct))
+    row(dash, 14, "PREMIUM/DISCOUNT", locTxt, locDir == 0 ? cNeutral : cPanelFg)
+    row(dash, 15, "KEY OPEN",         cKeyName == "" ? "—" : cKeyName, okColor(cKey))
+    row(dash, 16, "DELTA",            "N/A · NO ORDER FLOW", cNeutral)
+    row(dash, 17, "ABSORPTION",       "N/A · NO ORDER FLOW", cNeutral)
+    row(dash, 18, "RETEST",           state == "WAITING_FOR_RETEST" ? "WAITING · MFE " + n2(sMfeR) + "R" : na(sRetestBar) ? "—" : zKind + " TOUCHED", na(sRetestBar) ? cNeutral : cBull)
+    row(dash, 19, "CONFIRMATION",     sConfirmSrc, okColor(sConfirmOk))
+    row(dash, 20, "CONFLUENCE",       str.tostring(sConf) + " / 9", sConf >= confMinIn ? cBull : cNeutral)
+    row(dash, 21, "QUALITY",          str.tostring(math.round(sQual)) + " / 100 · " + (sQual >= 90 ? "A+" : sQual >= 75 ? "HIGH" : sQual >= 60 ? "DEVELOPING" : sQual >= 40 ? "LOW" : "INVALID"), sQual >= qualMinIn ? cBull : cNeutral)
+    row(dash, 22, "TARGET PATH",      na(sEntry) ? "—" : (sPathClear ? "CLEAR" : "OBSTRUCTED " + n2(sPathSev)), na(sEntry) ? cNeutral : sPathClear ? cBull : cBear)
+    row(dash, 23, "SETUP",            setupSeq > 0 ? setupType + " · SETUP" + str.tostring(setupSeq) : setupType, dirColor(sDir))
+    row(dash, 24, "DIRECTION",        sDir == 1 ? "LONG" : sDir == -1 ? "SHORT" : "—", dirColor(sDir))
+    row(dash, 25, "ENTRY",            f2(sEntry), cAccent)
+    row(dash, 26, "STOP",             na(sStop) ? "—" : f2(sStop) + "  (" + n2(sR) + " PTS)", cBear)
+    row(dash, 27, "TP1 / TP2",        na(sTp1) ? "—" : f2(sTp1) + " / " + f2(sTp2), cBull)
+    row(dash, 28, "RISK REFERENCE",   na(sR) or sR <= 0 ? "—" : "$" + str.tostring(math.round(sR * pointValIn)) + "/CONTRACT · " + str.tostring(math.floor(riskUsdIn / math.max(sR * pointValIn, 0.01))) + " CTS", cPanelDim)
+    row(dash, 29, "LAST OUTCOME",     sInvalidTxt, sInvalidTxt == "—" ? cNeutral : cPanelFg)
+    row(dash, 30, "CURRENT STATE",    str.replace_all(state, "_", " "), cPanelFg)
+    row(dash, 31, "NEXT CONDITION",   nextCond, cAccent)
+    table.cell(dash, 0, 32, tfWarn ? "⚠ NOT A 1-MINUTE CHART" : "DISPLAY ONLY · NO ORDERS", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cPanelBg)
+    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "SHADOW", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
+
+// =============================================================================
+// CHECKLIST PANEL
+// =============================================================================
+
+tick(bool b) =>
+    b ? "✓" : "·"
+
+var table chk = table.new(position.bottom_left, 2, 20, bgcolor = cPanelBg, frame_color = color.new(cPanelDim, 60), frame_width = 1, border_color = color.new(cPanelDim, 85), border_width = 1)
+
+if showCheck and barstate.islast
+    table.cell(chk, 0, 0, "NORTHSTAR CHECKLIST", text_color = cPanelFg, text_size = tSize, text_halign = text.align_left, bgcolor = cPanelBg)
+    table.cell(chk, 1, 0, "", text_color = cPanelFg, text_size = tSize, bgcolor = cPanelBg)
+    row(chk, 1,  tick(not na(pdH) and not na(pdL)) + " PRIOR DAY LEVELS",   f2(pdL) + " / " + f2(pdH), cPanelDim)
+    row(chk, 2,  tick(not na(onH) and not na(onL)) + " OVERNIGHT LEVELS",   f2(onL) + " / " + f2(onH), cPanelDim)
+    row(chk, 3,  tick(not na(dOpen)) + " DAY OPEN",                          f2(dOpen), cPanelDim)
+    row(chk, 4,  tick(not na(midnightET)) + " MIDNIGHT ET OPEN",             f2(midnightET), cPanelDim)
+    row(chk, 5,  tick(not na(open0830)) + " 08:30 ET OPEN",                  f2(open0830), cPanelDim)
+    row(chk, 6,  tick(not na(open0930)) + " 09:30 ET OPEN",                  f2(open0930), cPanelDim)
+    row(chk, 7,  tick(biasDir != 0) + " DAILY BIAS",                         biasTxt + " " + sgn(biasScore), dirColor(biasDir))
+    row(chk, 8,  tick(orbLocked) + " ORB LOCKED",                            na(orbRange) ? "—" : n2(orbRange) + " PTS", okColor(orbLocked))
+    row(chk, 9,  tick(orbValid) + " ORB IN RANGE",                           orbStatus, okColor(orbValid))
+    row(chk, 10, tick(sSweepKind != "") + " ONE-SIDED SWEEP",                sSweepKind == "" ? "—" : sSweepKind, okColor(sSweepKind != ""))
+    row(chk, 11, tick(cDisp) + " DISPLACEMENT",                              na(sDispScore) ? "—" : str.tostring(math.round(sDispScore)), okColor(cDisp))
+    row(chk, 12, tick(sHasFvg) + " FVG",                                     sHasFvg ? n2(sFvgTop - sFvgBot) + " PTS" : "—", okColor(sHasFvg))
+    row(chk, 13, tick(sStruct) + " STRUCTURE",                               sStruct ? structureLabel : "—", okColor(sStruct))
+    row(chk, 14, tick(not na(sRetestBar)) + " RETEST",                       na(sRetestBar) ? "—" : zKind, okColor(not na(sRetestBar)))
+    row(chk, 15, tick(sMfeR <= mfeMaxRIn) + " NO >1R EXCURSION",             n2(sMfeR) + "R", okColor(sMfeR <= mfeMaxRIn))
+    row(chk, 16, tick(sConf >= confMinIn) + " CONFLUENCE ≥ " + str.tostring(confMinIn), str.tostring(sConf) + "/9", okColor(sConf >= confMinIn))
+    row(chk, 17, tick(sPathClear) + " TARGET PATH",                          sPathClear ? "CLEAR" : "OBSTRUCTED", okColor(sPathClear))
+    row(chk, 18, tick(state == "ENTRY_READY") + " FINAL STATUS",             state == "ENTRY_READY" ? "ENTRY READY" : state == "DAY_DONE" ? "DAY DONE" : sConf >= confMinIn ? "SETUP DEVELOPING" : "WAIT", state == "ENTRY_READY" ? cBull : cNeutral)
+
+// =============================================================================
+// ALERT CONDITIONS (static, for users who prefer the classic alert dialog)
+// =============================================================================
+
+alertcondition(newSweepMk,  "Northstar · Liquidity swept",     "NORTHSTAR: liquidity swept")
+alertcondition(newDispMk,   "Northstar · Displacement",        "NORTHSTAR: displacement confirmed")
+alertcondition(newRetestMk, "Northstar · Retest detected",     "NORTHSTAR: retest detected")
+alertcondition(newEntryMk,  "Northstar · Entry ready",         "NORTHSTAR: entry ready (display only)")

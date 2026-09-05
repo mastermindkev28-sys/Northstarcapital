@@ -6,6 +6,50 @@ Versioning: semver on `param_version` for parameters, separate semver for code.
 
 ---
 
+## [0.2.0] — 2026-09-05 — TRADINGVIEW INDICATOR
+
+Scope narrowed to a TradingView indicator (decision D-001). Backend, Telegram,
+screenshot, database and archive designs remain as forward architecture and are
+not built.
+
+### Added
+- `tradingview/northstar_motion_model.pine` — Pine v6 overlay indicator,
+  ~1,500 lines, implementing the model end to end:
+  session and trading-day engine (Pacific day boundary, DST-aware), level
+  engine, opening-range engine with hard lock, liquidity pools with sweep /
+  reclaim / fail states, abnormal wick, eight-component displacement score,
+  FVG registry with mitigation tracking, non-repainting pivots with BOS/MSS,
+  order blocks, rejection blocks, six-component daily bias, premium/discount,
+  key-open alignment, retest engine with the >1R chase invalidation, target-path
+  obstruction scan, confluence (X/9), nine-component quality score, display-only
+  risk plan, the 23-state machine with reason-coded invalidations, the
+  institutional dashboard, the Northstar checklist panel, and text/JSON alerts.
+- `tradingview/README.md` — install, session table, dashboard guide, input
+  reference, non-repainting guarantees, stated limitations.
+- `docs/DECISIONS.md` — decisions log, authoritative over the other documents.
+
+### Decided
+- **D-002** execution timeframe is 1 minute.
+- **D-003** trading day is 00:00–23:59 Pacific (03:00–02:59 ET) for previous-day
+  high, low, open and close.
+- **D-004** ORB is 05:00–05:15 PT, which is the 08:00–08:15 ET of the original
+  specification restated in Pacific time.
+- **D-005** the stop-rule contradiction is deferred; the min/max/ORB-third stop
+  filters ship default-off so the impossible state cannot arise.
+- **D-006** CISD removed. Confluence drops from 12 factors to 9 available ones;
+  delta divergence and absorption are reported as N/A because TradingView has no
+  true order-flow data, and are excluded from the denominator rather than
+  silently scored zero.
+
+### Notes
+- No `request.security()` call exists in the script, so no higher-timeframe
+  value can leak backwards. Higher-timeframe structure is therefore excluded
+  from the bias score.
+- All engine thresholds are inputs and remain unvalidated starting points.
+- Risk figures are display only. Nothing here can place an order.
+
+---
+
 ## [0.1.0-proposed] — 2026-09-05 — PHASE 1: ARCHITECTURE
 
 **Status: awaiting approval. No implementation code exists.**
@@ -73,10 +117,8 @@ Versioning: semver on `param_version` for parameters, separate semver for code.
 
 ## Planned
 
-- `[0.2.0]` Phases 2–4 — session, ORB and level engines with full test suites,
-  after the blocking questions are answered.
-- `[0.3.0]` Phases 5–12 — structure engines.
-- `[0.4.0]` Phases 13–20 — qualification, risk, state machine.
-- `[0.5.0]` Phases 21–24 — dashboard, alerts, webhook, Telegram.
-- `[0.6.0]` Phases 25–29 — screenshots, database, archive, analytics, backtest.
-- `[0.7.0]` Phases 30–32 — shadow mode, human validation, execution interface.
+- Tune the indicator's thresholds against live sessions and record which ones
+  hold up; `docs/AMBIGUITY_REGISTER.md` lists what each is likely to get wrong.
+- Optional next steps, only if wanted: webhook backend consuming the JSON alert
+  envelope, then Telegram, screenshots, archive and backtesting per the existing
+  architecture documents.
