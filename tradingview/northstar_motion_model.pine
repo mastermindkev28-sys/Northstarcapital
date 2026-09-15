@@ -210,6 +210,8 @@ type Pool
     bool   wick
     int    recBar
     int    strength
+    float  rbTop       // rejection-block zone, recorded on the bar that made
+    float  rbBot       // the extreme, so no historical offset is ever needed
 
 // A price zone: fair value gap, order block or rejection block.
 type Zone
@@ -261,8 +263,9 @@ atr = ta.atr(atrLenIn)
 // rather than timestamp arithmetic keeps the boundary correct across DST, since
 // TradingView resolves the session in the given timezone.
 inDaySession = not na(time(timeframe.period, daySessIn, tzIn))
-prevInDay = na(inDaySession[1]) ? false : inDaySession[1]
+var bool prevInDay = false
 newDay = inDaySession and not prevInDay
+prevInDay := inDaySession
 
 // Start of the trading day, read from the session string, used to label the
 // session by its CLOSING date (CME convention) and to bound the flat period.
@@ -462,67 +465,73 @@ structureLabel = na(lastBreakBar) ? "—" : lastBreakKind + " " + (lastBreakDir 
 
 wSum = math.max(1, wAtr + wBody + wAvgBody + wCons + wCloseLoc + wOppWick + wStructW + wFvgW)
 
-dispEval(int n) =>
-    o0 = open[n - 1]
-    c0 = close
-    move = c0 - o0
-    dir = move >= 0 ? 1 : -1
-    hh = high
-    ll = low
-    bodySum = 0.0
-    consN = 0
-    oppW = 0.0
-    fvgIn = false
-    for k = 0 to n - 1
-        hh := math.max(hh, high[k])
-        ll := math.min(ll, low[k])
-        bodySum += math.abs(close[k] - open[k])
-        bdir = close[k] >= open[k] ? 1 : -1
-        consN += bdir == dir ? 1 : 0
-        oppW += dir == 1 ? math.max(0.0, math.min(open[k], close[k]) - low[k]) : math.max(0.0, high[k] - math.max(open[k], close[k]))
-        gap = dir == 1 ? low[k] - high[k + 2] : low[k + 2] - high[k]
-        fvgIn := fvgIn or gap >= fvgMinIn
-    legRange = math.max(hh - ll, syminfo.mintick)
-    atrRatio = atr > 0 ? math.abs(move) / atr : 0.0
-    bodyRatio = bodySum / legRange
-    avgBody = bodySum / n
-    refBody = bodySma20[n]
-    avgBodyRatio = na(refBody) or refBody <= 0 ? 1.0 : avgBody / refBody
-    consR = consN / n
-    closeLoc = dir == 1 ? (c0 - ll) / legRange : (hh - c0) / legRange
-    oppWickR = 1.0 - math.min(1.0, oppW / legRange)
-    structIn = not na(lastBreakBar) and (bar_index - lastBreakBar) < n and lastBreakDir == dir
-    sc = 0.0
-    sc += wAtr      * clamp01(atrRatio / math.max(dispAtrTgt, 0.01))
-    sc += wBody     * clamp01((bodyRatio - 0.40) / 0.50)
-    sc += wAvgBody  * clamp01((avgBodyRatio - 1.0) / 2.0)
-    sc += wCons     * clamp01(consR)
-    sc += wCloseLoc * clamp01((closeLoc - 0.50) / 0.40)
-    sc += wOppWick  * clamp01((oppWickR - 0.50) / 0.40)
-    sc += wStructW  * (structIn ? 1.0 : 0.0)
-    sc += wFvgW     * (fvgIn ? 1.0 : 0.0)
-    [100.0 * sc / wSum, dir, math.abs(move), hh, ll, fvgIn, structIn]
+// Average body immediately before the longest leg we will consider. A fixed
+// offset keeps the reference comparable across leg lengths and keeps every
+// history reference in this block statically resolvable.
+refBody = bodySma20[dispMaxBar]
 
-bestScore = 0.0
-bestDir   = 0
-bestBars  = 0
-bestMove  = 0.0
-bestHi    = high
-bestLo    = low
-bestFvg   = false
-bestStr   = false
+// One unconditional call per bar. Both loops are inside, so Pine never sees a
+// conditional call site and the history buffers stay consistent.
+dispBest() =>
+    float bScore = 0.0
+    int   bDir   = 0
+    int   bBars  = 0
+    float bMove  = 0.0
+    float bHi    = high
+    float bLo    = low
+    bool  bFvg   = false
+    bool  bStr   = false
+    for n = dispMinBar to math.max(dispMinBar, dispMaxBar)
+        o0 = open[n - 1]
+        c0 = close
+        move = c0 - o0
+        dir = move >= 0 ? 1 : -1
+        hh = high
+        ll = low
+        bodySum = 0.0
+        consN = 0
+        oppW = 0.0
+        fvgIn = false
+        for k = 0 to n - 1
+            hh := math.max(hh, high[k])
+            ll := math.min(ll, low[k])
+            bodySum += math.abs(close[k] - open[k])
+            bdir = close[k] >= open[k] ? 1 : -1
+            consN += bdir == dir ? 1 : 0
+            oppW += dir == 1 ? math.max(0.0, math.min(open[k], close[k]) - low[k]) : math.max(0.0, high[k] - math.max(open[k], close[k]))
+            gap = dir == 1 ? low[k] - high[k + 2] : low[k + 2] - high[k]
+            fvgIn := fvgIn or gap >= fvgMinIn
+        legRange = math.max(hh - ll, syminfo.mintick)
+        atrRatio = atr > 0 ? math.abs(move) / atr : 0.0
+        bodyRatio = bodySum / legRange
+        avgBody = bodySum / n
+        avgBodyRatio = na(refBody) or refBody <= 0 ? 1.0 : avgBody / refBody
+        consR = consN * 1.0 / n
+        closeLoc = dir == 1 ? (c0 - ll) / legRange : (hh - c0) / legRange
+        oppWickR = 1.0 - math.min(1.0, oppW / legRange)
+        structIn = not na(lastBreakBar) and (bar_index - lastBreakBar) < n and lastBreakDir == dir
+        sc = 0.0
+        sc += wAtr      * math.max(0.0, math.min(1.0, atrRatio / math.max(dispAtrTgt, 0.01)))
+        sc += wBody     * math.max(0.0, math.min(1.0, (bodyRatio - 0.40) / 0.50))
+        sc += wAvgBody  * math.max(0.0, math.min(1.0, (avgBodyRatio - 1.0) / 2.0))
+        sc += wCons     * math.max(0.0, math.min(1.0, consR))
+        sc += wCloseLoc * math.max(0.0, math.min(1.0, (closeLoc - 0.50) / 0.40))
+        sc += wOppWick  * math.max(0.0, math.min(1.0, (oppWickR - 0.50) / 0.40))
+        sc += wStructW  * (structIn ? 1.0 : 0.0)
+        sc += wFvgW     * (fvgIn ? 1.0 : 0.0)
+        scaled = 100.0 * sc / wSum
+        if scaled > bScore
+            bScore := scaled
+            bDir   := dir
+            bBars  := n
+            bMove  := math.abs(move)
+            bHi    := hh
+            bLo    := ll
+            bFvg   := fvgIn
+            bStr   := structIn
+    [bScore, bDir, bBars, bMove, bHi, bLo, bFvg, bStr]
 
-for n = dispMinBar to math.max(dispMinBar, dispMaxBar)
-    [sc, dr, mv, hh, ll, fv, st] = dispEval(n)
-    if sc > bestScore
-        bestScore := sc
-        bestDir   := dr
-        bestBars  := n
-        bestMove  := mv
-        bestHi    := hh
-        bestLo    := ll
-        bestFvg   := fv
-        bestStr   := st
+[bestScore, bestDir, bestBars, bestMove, bestHi, bestLo, bestFvg, bestStr] = dispBest()
 
 dispClass = bestScore >= dispStrIn ? "STRONG" : bestScore >= dispMinIn ? "QUALIFIED" : bestScore >= 30 ? "WEAK" : "NONE"
 dispQualified = bestScore >= dispMinIn and bestDir != 0
@@ -609,7 +618,7 @@ addPool(string kind, float lvl, int side, int strength) =>
                     p.kind := p.kind == kind ? kind : (side == 1 ? "EQH" : "EQL")
                     merged := true
         if not merged and array.size(pools) < 24
-            array.push(pools, Pool.new(kind = kind, lvl = lvl, side = side, st = "IDENTIFIED", penBar = na, penDepth = 0.0, wick = false, recBar = na, strength = strength))
+            array.push(pools, Pool.new(kind = kind, lvl = lvl, side = side, st = "IDENTIFIED", penBar = na, penDepth = 0.0, wick = false, recBar = na, strength = strength, rbTop = na, rbBot = na))
 
 // --- daily reset and pool construction ---------------------------------------
 var bool poolsBuilt = false
@@ -644,6 +653,8 @@ var float swpExtreme  = na
 var int   swpBar      = na
 var bool  swpWick     = false
 var int   swpStrength = 0
+var float swpRbTop    = na
+var float swpRbBot    = na
 var bool  orbHiTaken  = false
 var bool  orbLoTaken  = false
 
@@ -661,6 +672,8 @@ if confirmed and array.size(pools) > 0
                 p.penBar := bar_index
                 p.penDepth := pen
                 p.wick := p.side == 1 ? abnUp : abnDn
+                p.rbTop := p.side == 1 ? high : math.min(open, close)
+                p.rbBot := p.side == 1 ? math.max(open, close) : low
                 if countable
                     if p.kind == "ORBH"
                         orbHiTaken := true
@@ -669,7 +682,10 @@ if confirmed and array.size(pools) > 0
         else if p.st == "SWEPT"
             // deepen the recorded excursion while the sweep is live
             pen2 = p.side == 1 ? high - p.lvl : p.lvl - low
-            p.penDepth := math.max(p.penDepth, pen2)
+            if pen2 > p.penDepth
+                p.penDepth := pen2
+                p.rbTop := p.side == 1 ? high : math.min(open, close)
+                p.rbBot := p.side == 1 ? math.max(open, close) : low
             p.wick := p.wick or (p.side == 1 ? abnUp : abnDn)
             reclaimed = p.side == 1 ? close < p.lvl : close > p.lvl
             withinWindow = (bar_index - p.penBar) <= reclaimBar
@@ -686,6 +702,8 @@ if confirmed and array.size(pools) > 0
                 swpBar := bar_index
                 swpWick := p.wick
                 swpStrength := p.strength
+                swpRbTop := p.rbTop
+                swpRbBot := p.rbBot
             else if not withinWindow
                 p.st := "FAILED"
 
@@ -869,6 +887,12 @@ buildOrderBlock(int dir, int legBars) =>
                 found := true
     [t, b, found]
 
+// Called unconditionally on every bar for the current best leg, so Pine sees a
+// single consistent call site. It is captured into the setup at the moment
+// displacement confirms - the leg's final bar - so the lookback offsets are
+// measured from the right place.
+[obTopNow, obBotNow, obFoundNow] = buildOrderBlock(bestDir, math.max(1, bestBars))
+
 // -----------------------------------------------------------------------------
 // Target path: opposing zones sitting between the entry and TP2.
 // -----------------------------------------------------------------------------
@@ -1040,6 +1064,9 @@ if confirmed
             sSweepBar := swpBar
             sWick := swpWick
             sStrength := swpStrength
+            sHasRb := swpWick and not na(swpRbTop)
+            sRbTop := swpRbTop
+            sRbBot := swpRbBot
             sInvalidTxt := "—"
             state := "LIQUIDITY_SWEPT"
             milestone := 4
@@ -1061,6 +1088,9 @@ if confirmed
             sDispBars := bestBars
             sLegHi := bestHi
             sLegLo := bestLo
+            sHasOb := obFoundNow
+            sObTop := obTopNow
+            sObBot := obBotNow
             setupType := sWick and (bar_index - sSweepBar) <= 5 ? "NEWS REVERSAL" : "CONTINUATION"
             state := "DISPLACEMENT_DETECTED"
             milestone := 6
@@ -1106,15 +1136,8 @@ if confirmed
 
     // ---- 8 · build the plan and wait for a retest ----------------------------
     else if state == "STRUCTURE_CONFIRMED"
-        [obT, obB, obFound] = buildOrderBlock(sDir, math.max(1, sDispBars))
-        sHasOb := obFound
-        sObTop := obT
-        sObBot := obB
-        off = bar_index - sSweepBar
-        if sWick and off >= 0 and off < 480
-            sHasRb := true
-            sRbTop := sDir == 1 ? math.min(open[off], close[off]) : high[off]
-            sRbBot := sDir == 1 ? low[off] : math.max(open[off], close[off])
+        // The order block and rejection block were captured on the bars that
+        // formed them, so only the zone choice and the plan are built here.
         // zone selection: preferred first, then the documented fallback order
         float ztmp = na
         float zbmp = na

@@ -186,6 +186,10 @@ Pine tables cannot be repositioned in place.
   lookahead bugs in Pine. Bias is computed from on-chart levels only.
 * There is no news filter. The News Reversal classification is inferred from an
   abnormal wick within five bars of the sweep, not from an economic calendar.
+* The order block is captured on the bar displacement confirms, and the
+  rejection block on the bar that made the swept extreme. Both are recorded
+  where they form rather than reconstructed later, so their geometry does not
+  depend on how long the setup takes to develop.
 * Hypothetical fill tracking (entry → TP1 → runner → exit) is for visual review.
   It assumes touch fills with no slippage and is not a backtest.
 * Order flow is absent and is reported as absent.

@@ -6,6 +6,29 @@ Versioning: semver on `param_version` for parameters, separate semver for code.
 
 ---
 
+## [0.2.1] — 2026-09-15 — COMPILE FIXES
+
+### Fixed
+- `na()` was called on a `series bool` when detecting the first bar of a trading
+  day (CE10123). The previous bar's session flag is now carried in a `var`,
+  which removes the type error and the first-bar edge case together.
+- The displacement scorer was called from inside a `for` loop (CW10003), so Pine
+  could not guarantee a consistent history buffer. Both loops now live inside a
+  single function called once per bar, unconditionally. The average-body
+  reference moved to a fixed offset so every history reference in that block is
+  statically resolvable, and the consistency ratio is forced to float division.
+- `buildOrderBlock()` had the same conditional-call problem and, more seriously,
+  a real defect: it was called when structure confirmed but measured its
+  lookback from *that* bar, so the order block drifted by however many bars the
+  setup took to develop. It is now called unconditionally every bar and captured
+  at the moment displacement confirms, which is the leg's final bar.
+- The rejection block was reconstructed with a variable historical offset from
+  the sweep bar. Its geometry is now recorded on the `Pool` at the moment of
+  penetration — and re-recorded if the excursion deepens — so no historical
+  offset is used at all.
+
+---
+
 ## [0.2.0] — 2026-09-05 — TRADINGVIEW INDICATOR
 
 Scope narrowed to a TradingView indicator (decision D-001). Backend, Telegram,
