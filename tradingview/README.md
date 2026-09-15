@@ -145,6 +145,38 @@ decision, not a bug, and it is left to you.
 Create one alert on the indicator using **"Any alert() function call"** to
 receive every enabled event. Which events fire is controlled in group 16.
 
+### Setting one up
+
+1. With the indicator on the chart, click the **alarm clock** icon (or right-click
+   the chart → **Add alert**).
+2. **Condition** → select **Northstar Motion Model**.
+3. In the dropdown below it, choose **Any alert() function call** for the whole
+   progression, or pick a single named condition (e.g. *Northstar · Entry ready*)
+   to receive only that one.
+4. **Notifications** tab → tick **Push notification** for your phone (needs the
+   TradingView app installed and signed in), and/or email or webhook.
+5. Set expiry to **open-ended** if your plan allows it.
+
+Everything fires on **bar close**, so on a 1-minute chart a signal reaches you
+within a minute of the bar that produced it.
+
+Active-alert limits are set by your TradingView plan — the free tier allows very
+few, so if you want the full progression rather than a single event, use one
+alert on *Any alert() function call* and control which events fire with the
+group 16 toggles.
+
+### Which alert to use for "tell me when it's ready"
+
+| You want | Use |
+|---|---|
+| Only the finished plan | *Northstar · Entry ready*, or leave only **Alert · entry ready** on |
+| An early heads-up while it develops | **Alert · confluence threshold reached** (default 6 of 9) |
+| The whole story as it unfolds | *Any alert() function call* with several toggles on |
+
+The confluence alert fires **once per setup**, the first time the count reaches
+your threshold. It is deliberately not an entry — the plan is not final at that
+point, and the setup can still be invalidated by the retest rules.
+
 Format is switchable:
 
 * **Text** — a readable Telegram/phone-friendly message.

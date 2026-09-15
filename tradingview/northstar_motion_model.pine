@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-// BUILD 2026-09-15d   <-- if this line is missing or different, you have an old
+// BUILD 2026-09-15e   <-- if this line is missing or different, you have an old
 //                        copy. Re-copy from the raw file and paste over ALL of
 //                        the editor contents (Ctrl+A first).
 // NORTHSTAR CAPITAL - NORTHSTAR MOTION MODEL
@@ -193,6 +193,8 @@ alertFmt    = input.string("Text", "Alert format", options = ["Text", "JSON"], g
 alSweep     = input.bool(true, "Alert · liquidity swept", group = G_ALR)
 alDisp      = input.bool(true, "Alert · displacement confirmed", group = G_ALR)
 alRetest    = input.bool(true, "Alert · retest detected", group = G_ALR)
+alConf      = input.bool(true, "Alert · confluence threshold reached", group = G_ALR, tooltip = "Fires once per setup, the first time confluence reaches the level below. This is the early heads-up: it arrives while the setup is still developing, before the entry plan is finalised.")
+alConfMin   = input.int(6, "Confluence alert threshold (of 9)", minval = 1, maxval = 9, group = G_ALR)
 alEntry     = input.bool(true, "Alert · entry ready", group = G_ALR)
 alInval     = input.bool(true, "Alert · setup invalidated", group = G_ALR)
 alOrb       = input.bool(true, "Alert · ORB locked", group = G_ALR)
@@ -862,6 +864,7 @@ var bool cPd    = false
 var bool cKey   = false
 var bool cPath  = false
 var string cKeyName = ""
+var bool confAlerted = false
 
 var bool doReset = false
 
@@ -996,6 +999,7 @@ if confirmed
         cKey := false
         cPath := false
         cKeyName := ""
+        confAlerted := false
         doReset := false
 
     // ---- live scoring, so the dashboard is never stale -----------------------
@@ -1013,6 +1017,10 @@ if confirmed
         cKey   := cKeyName != ""
         cPath  := sPathClear
         sConf := (cSweep ? 1 : 0) + (cDisp ? 1 : 0) + (cFvg ? 1 : 0) + (cOb ? 1 : 0) + (cRb ? 1 : 0) + (cBias ? 1 : 0) + (cPd ? 1 : 0) + (cKey ? 1 : 0) + (cPath ? 1 : 0)
+
+        if alConf and not confAlerted and sConf >= alConfMin
+            confAlerted := true
+            alert(evMsg("CONFLUENCE", str.tostring(sConf) + "/9 confluence reached on a " + (sDir == 1 ? "LONG" : "SHORT") + " setup. Zone " + f2(zBot) + "-" + f2(zTop) + ". Still developing - not an entry.", 11), alert.freq_once_per_bar_close)
 
         qwSum = math.max(1, qwContext + qwLiq + qwDisp + qwStruct + qwRetest + qwConfirm + qwConf + qwRisk + qwTarget)
         qCtx   = cBias ? clamp01(math.abs(biasScore) / 100.0) : 0.0
@@ -1511,7 +1519,7 @@ if showDash and barstate.islast
     row(dash, 30, "CURRENT STATE",    str.replace_all(state, "_", " "), cPanelFg)
     row(dash, 31, "NEXT CONDITION",   nextCond, cAccent)
     table.cell(dash, 0, 32, tfWarn ? "⚠ NOT A 1-MINUTE CHART" : "DISPLAY ONLY · NO ORDERS", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cPanelBg)
-    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "BUILD 15d", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
+    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "BUILD 15e", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
 
 // =============================================================================
 // CHECKLIST PANEL
