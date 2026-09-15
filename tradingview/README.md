@@ -17,6 +17,29 @@ what condition it is waiting for.
 4. Put the chart on **NQ1! (or MNQ1!) and the 1-minute timeframe**. The
    dashboard shows a red warning if it is on any other timeframe, because the
    ORB, sweep and displacement definitions assume 1m bars.
+5. **Turn on Extended Trading Hours.** Right-click the chart → **Settings** →
+   **Symbol** tab → tick **Extended trading hours** (newer layouts also have an
+   ETH/RTH toggle next to the symbol name).
+
+### Extended hours is not optional
+
+With extended hours **off**, TradingView shows only the regular session —
+06:30–13:00 PT (09:30–16:00 ET) — and hides everything else. Nothing is deleted;
+those bars are simply not being displayed, and an indicator can only read the
+bars the chart gives it.
+
+That breaks this model completely, because almost everything it needs happens
+outside regular hours:
+
+| Needs | Window | Inside regular hours? |
+|---|---|---|
+| Opening range | 05:00–05:15 PT | **No** — zero bars, no range can be built |
+| Execution window | 05:30–08:00 PT | **No** — ends an hour before RTH opens |
+| Overnight high / low | 15:00–05:00 PT | **No** |
+| Previous-day high / low | 15:00–14:00 PT | Partly |
+
+If the ORB window passes with no bars in it, the dashboard says so directly:
+`ORB STATUS: NO BARS IN ORB WINDOW — TURN ON EXTENDED HOURS`.
 
 Chart timezone does not matter — the script converts internally. All session
 inputs are interpreted in the **Timezone** input, which defaults to

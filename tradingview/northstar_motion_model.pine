@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-// BUILD 2026-09-15c   <-- if this line is missing or different, you have an old
+// BUILD 2026-09-15d   <-- if this line is missing or different, you have an old
 //                        copy. Re-copy from the raw file and paste over ALL of
 //                        the editor contents (Ctrl+A first).
 // NORTHSTAR CAPITAL - NORTHSTAR MOTION MODEL
@@ -277,6 +277,12 @@ dayStartM    = nz(str.tonumber(str.substring(daySessIn, 2, 4)), 0.0)
 dayStartMin  = int(dayStartH) * 60 + int(dayStartM)
 labelShiftMs = dayStartMin == 0 ? 0 : (1440 - dayStartMin) * 60000
 
+// End of the ORB window, used to detect a chart that supplies no bars there -
+// which is what happens when extended trading hours are switched off.
+orbEndH   = nz(str.tonumber(str.substring(orbSessIn, 5, 7)), 5.0)
+orbEndM   = nz(str.tonumber(str.substring(orbSessIn, 7, 9)), 15.0)
+orbEndMin = int(orbEndH) * 60 + int(orbEndM)
+
 var string sessionDate = ""
 if newDay
     tLabel = time + labelShiftMs
@@ -389,7 +395,11 @@ if orbEnded and not orbLocked
 orbRange = na(orbH) or na(orbL) ? na : orbH - orbL
 orbEq    = na(orbH) or na(orbL) ? na : (orbH + orbL) / 2.0
 orbValid = orbLocked and not na(orbRange) and orbRange >= orbMinIn and orbRange <= orbMaxIn
-orbStatus = not orbLocked ? (inORB ? "BUILDING" : "PENDING") : (na(orbRange) ? "NO DATA" : orbRange < orbMinIn ? "STAND DOWN · TOO SMALL" : orbRange > orbMaxIn ? "STAND DOWN · TOO LARGE" : "LIVE")
+// The ORB window has come and gone but no bar ever fell inside it. On NQ this
+// means the chart is showing regular hours only: 06:30-13:00 PT. Pre-market is
+// not missing from the data, it is switched off in the chart's session setting.
+orbNoData = minsOfDay >= orbEndMin and minsOfDay < dayStartMin and na(orbH)
+orbStatus = orbNoData ? "NO BARS IN ORB WINDOW — TURN ON EXTENDED HOURS" : not orbLocked ? (inORB ? "BUILDING" : "PENDING") : (na(orbRange) ? "NO DATA" : orbRange < orbMinIn ? "STAND DOWN · TOO SMALL" : orbRange > orbMaxIn ? "STAND DOWN · TOO LARGE" : "LIVE")
 
 // =============================================================================
 // ABNORMAL WICK
@@ -1472,7 +1482,7 @@ if showDash and barstate.islast
 
     row(dash, 2,  "SESSION",          inORB ? "OPENING RANGE" : inExec ? "EXECUTION" : pastFlat ? "CLOSED" : "PRE-MARKET", inExec ? cBull : cNeutral)
     row(dash, 3,  "ORB SIZE",         na(orbRange) ? "—" : n2(orbRange) + " PTS", cPanelFg)
-    row(dash, 4,  "ORB STATUS",       orbStatus, orbValid ? cBull : orbLocked ? cBear : cNeutral)
+    row(dash, 4,  "ORB STATUS",       orbStatus, orbNoData ? cBear : orbValid ? cBull : orbLocked ? cBear : cNeutral)
     row(dash, 5,  "DAILY BIAS",       biasTxt, dirColor(biasDir))
     row(dash, 6,  "BIAS SCORE",       sgn(biasScore), dirColor(biasDir))
     row(dash, 7,  "LIQUIDITY",        liqSummary(), cPanelFg)
@@ -1501,7 +1511,7 @@ if showDash and barstate.islast
     row(dash, 30, "CURRENT STATE",    str.replace_all(state, "_", " "), cPanelFg)
     row(dash, 31, "NEXT CONDITION",   nextCond, cAccent)
     table.cell(dash, 0, 32, tfWarn ? "⚠ NOT A 1-MINUTE CHART" : "DISPLAY ONLY · NO ORDERS", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cPanelBg)
-    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "BUILD 15c", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
+    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "BUILD 15d", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
 
 // =============================================================================
 // CHECKLIST PANEL
