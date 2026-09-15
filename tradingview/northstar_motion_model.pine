@@ -1,5 +1,8 @@
 //@version=6
 // =============================================================================
+// BUILD 2026-09-15c   <-- if this line is missing or different, you have an old
+//                        copy. Re-copy from the raw file and paste over ALL of
+//                        the editor contents (Ctrl+A first).
 // NORTHSTAR CAPITAL - NORTHSTAR MOTION MODEL
 // Market intelligence indicator for NQ / MNQ futures on the 1-minute chart.
 //
@@ -284,7 +287,9 @@ minsOfDay = hour(time, tzIn) * 60 + minute(time, tzIn)
 // Eastern-time clock, used only for the key opens that are defined in ET.
 etMins = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
 etDayId = year(time, "America/New_York") * 10000 + month(time, "America/New_York") * 100 + dayofmonth(time, "America/New_York")
-newEtDay = na(etDayId[1]) or etDayId != etDayId[1]
+var int prevEtDayId = 0
+newEtDay = etDayId != prevEtDayId
+prevEtDayId := etDayId
 
 inORB  = not na(time(timeframe.period, orbSessIn, tzIn))
 inExec = not na(time(timeframe.period, exeSessIn, tzIn))
@@ -1496,7 +1501,7 @@ if showDash and barstate.islast
     row(dash, 30, "CURRENT STATE",    str.replace_all(state, "_", " "), cPanelFg)
     row(dash, 31, "NEXT CONDITION",   nextCond, cAccent)
     table.cell(dash, 0, 32, tfWarn ? "⚠ NOT A 1-MINUTE CHART" : "DISPLAY ONLY · NO ORDERS", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_left, bgcolor = cPanelBg)
-    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "SHADOW", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
+    table.cell(dash, 1, 32, tfWarn ? "MODEL ASSUMES 1M" : "BUILD 15c", text_color = tfWarn ? cBear : cPanelDim, text_size = size.tiny, text_halign = text.align_right, bgcolor = cPanelBg)
 
 // =============================================================================
 // CHECKLIST PANEL
